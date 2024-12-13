@@ -14,6 +14,7 @@ import os
 import numpy as np
 import gams.transfer as gt
 import subprocess
+from functools import reduce
 
 
 API_TOKEN = '38bb40c2e0090463d92457a7bb87af45fdbba28b'
@@ -220,22 +221,34 @@ def format_data_energy(filenames):
     # Find the representative year
 
     df_energy = {}
-    for key, filename in filenames.items():
+    for key, item in filenames.items():
+        filename, reading = item[0], item[1]
+        
         # Extract from the data results 
-        results = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3, 4, 5])
-
-        repr_year = find_representative_year(results)
-
-        # Format the data
-        df = results.loc[:, repr_year]
+        if reading == 'renewable_ninja':
+            df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3, 4, 5])
+            repr_year = find_representative_year(df)
+            # Format the data
+            df = df.loc[:, repr_year]
+        elif reading == 'standard':
+            df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2])
+            repr_year = find_representative_year(df)
+        else:
+            raise ValueError('Unknown reading. Only implemented for: renewable_ninja, standard.')
         df = df.reset_index()
         df = df.loc[:, ['season', 'day', 'hour', repr_year]].rename(columns={repr_year: key})
         
         df_energy.update({key: df})
         
-    df_energy = pd.merge(df_energy['PV'], df_energy['Wind'], on=['season', 'day', 'hour'])
+    keys_to_merge = ['PV', 'Wind', 'Load', 'ROR']
+    keys_to_merge = [i for i in keys_to_merge if i in df_energy.keys()]
 
-    print('Annual capacity factor (%):', df_energy[['PV', 'Wind']].mean())
+    # Dynamically merge all DataFrames in df_energy based on the specified keys
+    df_energy = reduce(
+        lambda left, right: pd.merge(left, right, on=['season', 'day', 'hour']),
+        (df_energy[k] for k in keys_to_merge))
+
+    print('Annual capacity factor (%):', df_energy[keys_to_merge].mean())
     
     return df_energy
 

@@ -10,7 +10,7 @@ This project is part of the World Bank's initiative to analyze and optimize repr
 ## Project Structure
 - `representative_days.ipynb`: Main notebook for the project.
 - `utils.py`: Utility functions for the project.
-- `data/`: Contains all the datasets used in the project (not git-tracked).
+- `data/`: Contains all the datasets used in the project (not gt-tracked).
 - `parse_data/`: Includes scripts for parsing and cleaning the data (not git-tracked).
 - `docs/`: Documentation and additional resources.
 
