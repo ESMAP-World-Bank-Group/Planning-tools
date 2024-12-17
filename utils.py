@@ -15,6 +15,7 @@ import numpy as np
 import gams.transfer as gt
 import subprocess
 from functools import reduce
+import matplotlib.pyplot as plt
 
 
 API_TOKEN = '38bb40c2e0090463d92457a7bb87af45fdbba28b'
@@ -247,6 +248,12 @@ def format_data_energy(filenames):
     df_energy = reduce(
         lambda left, right: pd.merge(left, right, on=['season', 'day', 'hour']),
         (df_energy[k] for k in keys_to_merge))
+    
+    # If 2/29, remove it
+    df_energy = df_energy[~((df_energy['season'] == 2) & (df_energy['day'] == 29))]
+    
+    if df_energy.isna().any().any():
+        print('Warning: NaN values in the DataFrame')
 
     print('Annual capacity factor (%):', df_energy[keys_to_merge].mean())
     
@@ -286,10 +293,7 @@ def find_special_days(df_energy):
         else:
             raise ValueError('Unknown column. Only implemented for: Wind, PV, ROR, Load.')
         
-    # Remove all lines in dict_info
-    for special_day in special_days.values():
-        df_energy = df_energy[~((df_energy['season'] == special_day[0]) & (df_energy['day'] == special_day[1]))]
-        
+
     # Format special days
     special_days = sorted([item for sublist in special_days.values() for item in sublist])
     special_days = pd.Series(special_days)
@@ -297,6 +301,15 @@ def find_special_days(df_energy):
     special_days = special_days.set_index('days').groupby('days').sum().reset_index()
     
     return special_days, df_energy
+
+
+
+def removed_special_days(df_energy, special_days):
+    # Remove all lines in dict_info
+    for special_day in special_days['days']:
+        df_energy = df_energy[~((df_energy['season'] == special_day[0]) & (df_energy['day'] == special_day[1]))]
+        
+    return df_energy
 
 
 def calculate_pairwise_correlation(df):
@@ -332,9 +345,9 @@ def format_optim_repr_days(df_energy, name_data, folder_process_data):
     folder_process_data: str
         Path to save the file.
     """
-    
+    df_formatted_optim = df_energy.copy()
     # Add correlation
-    df_formatted_optim = calculate_pairwise_correlation(df_energy)
+    df_formatted_optim = calculate_pairwise_correlation(df_formatted_optim)
     df_formatted_optim.set_index(['season', 'day', 'hour'], inplace=True)
     df_formatted_optim.index.names = [''] * 3
     # Add header to the DataFrame with the name of the zone
@@ -349,7 +362,7 @@ def format_optim_repr_days(df_energy, name_data, folder_process_data):
     return df_formatted_optim, path_data_file
 
 
-def launch_optim_repr_days(path_data_file, folder_process_data):
+def launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=3):
     """Launch the representative dyas optimization.
     
     Parameters
@@ -363,8 +376,6 @@ def launch_optim_repr_days(path_data_file, folder_process_data):
     path_main_file = os.path.join(os.getcwd(),'gams/OptimizationModel.gms')
     path_setting_file = os.path.join(os.getcwd(),'gams/settings.csv')
     path_data_file = os.path.join(os.getcwd(), path_data_file)
-    nbr_days = 3
-
 
     if os.path.isfile(path_main_file) and os.path.isfile(path_data_file):
         command = ["gams", path_main_file] + ["--data {}".format(path_data_file),
@@ -373,12 +384,12 @@ def launch_optim_repr_days(path_data_file, folder_process_data):
     else:
         raise ValueError('Gams file or data file not found')
 
-    # Print the command
-    print("Command to execute:", command)
-    
+    # Print the command    
     cwd = os.path.join(os.getcwd(), folder_process_data)
-
+    print('Launch GAMS code')
     subprocess.run(command, cwd=cwd, stdout=subprocess.DEVNULL)
+    print('End GAMS code')
+
     
     # TODO: Check if the results exist 
 
@@ -434,17 +445,19 @@ def parse_repr_days(folder_process_data, special_days):
     # Add special days
     repr_days = pd.concat((special_days, repr_days), axis=0, ignore_index=True)
 
-    print('Number of days:', repr_days.shape[0])
-    print('Total weight:', repr_days['weight'].sum())
+    print('Number of days: {}'.format(repr_days.shape[0]))
+    print('Total weight: {}'.format(repr_days['weight'].sum()))
     
     # Format the data
     repr_days['season'] = repr_days['days'].apply(lambda x: x[0])
     repr_days['day'] = repr_days['days'].apply(lambda x: x[1])
     repr_days.drop(columns=['days'], inplace=True)
     repr_days = repr_days.loc[:, ['season', 'day', 'weight']]
-    repr_days = repr_days.astype({'season': int, 'day': int, 'weight': int})
+    repr_days = repr_days.astype({'season': int, 'day': int, 'weight': float})
     repr_days.sort_values(['season', 'weight'], inplace=True)
     repr_days['daytype'] = repr_days.groupby('season').cumcount() + 1
+    
+    print(repr_days.groupby('season')['weight'].sum())
     
     return repr_days
 
@@ -460,13 +473,13 @@ def format_epm_phours(repr_days, folder, name_data=''):
         Path to save the file.
     """
     repr_days_formatted_epm = repr_days.copy()
-    repr_days_formatted_epm = repr_days.set_index(['season', 'daytype']).squeeze()
+    repr_days_formatted_epm = repr_days.set_index(['season', 'daytype'])['weight'].squeeze()
     repr_days_formatted_epm = pd.concat([repr_days_formatted_epm] * 24, keys=['t{:02d}'.format(i) for i in range(1, 25)], names=['hour'], axis=1)
     
     path_file = os.path.join(folder, 'pHours_{}.csv'.format(name_data))
     repr_days_formatted_epm.to_csv(path_file)
     print('File saved at:', path_file)
-    print('Number of hours: {:.0f}'.format(repr_days_formatted_epm.sum().sum()))
+    print('Number of hours: {:.0f}'.format(repr_days_formatted_epm.sum().sum() / len(repr_days_formatted_epm.columns)))
     
     
 def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
@@ -481,22 +494,93 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
     name_data: str
         Name of the zone.
     """
-    
-    pVREProfile = df_energy[[i for i in ['PV', 'Wind']]]
-    pVREProfile.index.names = ['season', 'day', 'hour']
-    pVREProfile.stack().unstack('hour')
+    pVREProfile = df_energy.copy()
+    pVREProfile = pVREProfile.set_index(['season', 'day', 'hour'])
+    pVREProfile = pVREProfile[[i for i in ['PV', 'Wind'] if i in df_energy.columns]]
     pVREProfile.columns.names = ['Power']
     t = repr_days.set_index(['season', 'day'])
-    temp = pVREProfile.unstack('hour')
+    pVREProfile = pVREProfile.unstack('hour')
     # select only the representative days
-    temp = temp.loc[t.index, :]
-    temp = temp.stack('Power')
-    temp = pd.merge(temp.reset_index(), t.reset_index(), on=['season', 'day']).set_index(['season', 'daytype', 'Power'])
-    temp.drop(['day', 'weight'], axis=1, inplace=True)
-    temp = pd.concat([temp], keys=[name_data], names=['zone'], axis=0)
+    pVREProfile = pVREProfile.loc[t.index, :]
+    pVREProfile = pVREProfile.stack('Power')
+    pVREProfile = pd.merge(pVREProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(['season', 'daytype', 'Power'])
+    pVREProfile.drop(['day', 'weight'], axis=1, inplace=True)
+    pVREProfile = pd.concat([pVREProfile], keys=[name_data], names=['zone'], axis=0)
     
-    temp.columns = ['t{:02d}'.format(i + 1) for i in temp.columns]
+    pVREProfile.columns = ['t{:02d}'.format(i + 1) for i in pVREProfile.columns]
     
-    temp.to_csv(os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)))
+    pVREProfile.to_csv(os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)))
     print('File saved at:', os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)))
     
+
+def format_epm_demandprofile(df_energy, repr_days, folder, name_data=''):
+    """Format pDemandProfile EPM like
+    
+    Parameters
+    ----------
+    df_energy: pd.DataFrame
+        DataFrame with the energy data.
+    repr_days: pd.DataFrame
+        DataFrame with the representative days.
+    name_data: str
+        Name of the zone.
+    """
+    pDemandProfile = df_energy.copy()
+    pDemandProfile = pDemandProfile.set_index(['season', 'day', 'hour'])
+    pDemandProfile = pDemandProfile['Load'].squeeze()
+   # pVREProfile.index.names = ['season', 'day', 'hour']
+    t = repr_days.set_index(['season', 'day'])
+    pDemandProfile = pDemandProfile.unstack('hour')
+    # select only the representative days
+    pDemandProfile = pDemandProfile.loc[t.index, :]
+    pDemandProfile = pd.merge(pDemandProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(['season', 'daytype'])
+    pDemandProfile.drop(['day', 'weight'], axis=1, inplace=True)
+    pDemandProfile = pd.concat([pDemandProfile], keys=[name_data], names=['zone'], axis=0)
+    
+    pDemandProfile.columns = ['t{:02d}'.format(i + 1) for i in pDemandProfile.columns]
+    
+    pDemandProfile.to_csv(os.path.join(folder, 'pDemandProfile_{}.csv'.format(name_data)))
+    print('File saved at:', os.path.join(folder, 'pDemandProfile_{}.csv'.format(name_data)))
+    
+
+def plot_repr_variable(df, day_level='daytype', season_level='season'):
+    fig, ax = plt.subplots()
+
+    df.plot(ax=ax)
+
+    # Adding the representative days and seasons
+    n_rep_days = len(df.index.get_level_values(day_level).unique())
+    dispatch_seasons = df.index.get_level_values(season_level).unique()
+    total_days = len(dispatch_seasons) * n_rep_days
+    y_max = ax.get_ylim()[1]
+
+    for d in range(total_days):
+        x_d = 24 * d
+
+        # Add vertical lines to separate days
+        is_end_of_season = d % n_rep_days == 0
+        linestyle = '-' if is_end_of_season else '--'
+        ax.axvline(x=x_d, color='slategrey', linestyle=linestyle, linewidth=0.8)
+
+        # Add day labels (d1, d2, ...)
+        ax.text(
+            x=x_d + 12,  # Center of the day (24 hours per day)
+            y=y_max * 0.99,
+            s=f'd{(d % n_rep_days) + 1}',
+            ha='center',
+            fontsize=7
+        )
+
+    # Add season labels
+    season_x_positions = [24 * n_rep_days * s + 12 * n_rep_days for s in range(len(dispatch_seasons))]
+    ax.set_xticks(season_x_positions)
+    ax.set_xticklabels(dispatch_seasons, fontsize=8)
+    ax.set_xlim(left=0, right=24 * total_days)
+
+    # Remove grid
+    ax.grid(False)
+    # Remove top spine to let days appear
+    ax.spines['top'].set_visible(False)
+    ax.set_xlabel('Hours')
+    plt.show()
+        
