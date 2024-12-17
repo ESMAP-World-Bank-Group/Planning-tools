@@ -15,7 +15,17 @@ The project enables users to:
 - Calculate representative days for a given year.
 - Export pHours, pDemandProfile, pVREGenProfile for the representative days.
 
+
+### Representative Days
+
 It is based on previously developed GAMS code for the Poncelet algorithm. The objective has been to automate the process and make it more user-friendly.
+
+The code will automatically get the min production for PV, the min production for Wind, and the max load days for each season, called the special days.
+It will automatically removes the special days from the input file for the Poncelet algorithm and then runs the Poncelet algorithm to generate the representative days.
+The user can decide how many representative days to generate per season.
+`launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=2)`
+
+Finally, the code will merge the sepcial days with the representative day from the Poncelet algorithm and output the final representative days.
 
 ## Project Structure
 - `representative_days.ipynb`: Main notebook for the project. Copy and paste for your own project.
