@@ -44,3 +44,21 @@ cd RepresentativeDays
 pip install -r requirements.txt
 ```
 
+### Install gams API
+
+```bash
+pip install gamsapi[transfer]==xx.y.z
+```
+
+### Create notebook kernel from conda env
+You need to create a kernel if you want to run the notebook. The idea is to first create a conda environment and then create a kernel from that environment.
+After creating the conda environment, you can create a kernel for the environment. First, install the ipykernel package:
+
+```bash
+conda install ipykernel
+```
+Once the ipykernel package is installed, you can create a kernel for the environment:
+
+```bash
+python -m ipykernel --name=esmap_env --display-name "Python (esmap_env)"
+```

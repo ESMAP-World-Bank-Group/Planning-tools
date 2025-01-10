@@ -16,10 +16,14 @@ import gams.transfer as gt
 import subprocess
 from functools import reduce
 import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from typing import Tuple, Union
+import matplotlib.pyplot as plt
 
 
 API_TOKEN = '38bb40c2e0090463d92457a7bb87af45fdbba28b'
 
+nb_days = pd.Series([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], index=range(1, 13))
 
 def get_renewable_data(power_type, locations, start_date, end_date, api_token=API_TOKEN, dataset="merra2", capacity=1,
                        system_loss=0.1, height=100, tracking=0, tilt=35, azim=180,
@@ -303,7 +307,6 @@ def find_special_days(df_energy):
     return special_days, df_energy
 
 
-
 def removed_special_days(df_energy, special_days):
     # Remove all lines in dict_info
     for special_day in special_days['days']:
@@ -509,6 +512,9 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
     
     pVREProfile.columns = ['t{:02d}'.format(i + 1) for i in pVREProfile.columns]
     
+    # Reorder index names
+    pVREProfile = pVREProfile.reorder_levels(['zone', 'Power', 'season', 'daytype'], axis=0)
+    
     pVREProfile.to_csv(os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)))
     print('File saved at:', os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)))
     
@@ -583,4 +589,152 @@ def plot_repr_variable(df, day_level='daytype', season_level='season'):
     ax.spines['top'].set_visible(False)
     ax.set_xlabel('Hours')
     plt.show()
+    
+
+def cluster_data(data: pd.DataFrame, n_clusters: int) -> Tuple[np.ndarray, pd.DataFrame]:
+    """
+    Cluster the historical data into specified number of clusters.
+
+    Parameters:
+        data (pd.DataFrame): The historical data with years as columns.
+        n_clusters (int): Number of clusters to divide the data into.
+
+    Returns:
+        Tuple[np.ndarray, pd.DataFrame]: Cluster labels and cluster centers.
+    """
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = kmeans.fit_predict(data.T)
+    cluster_centers = pd.DataFrame(kmeans.cluster_centers_, columns=data.index, index=range(n_clusters))
+    return labels, cluster_centers
+
+
+def select_representative_year_real(
+    data: pd.DataFrame, labels: np.ndarray, cluster_centers: pd.DataFrame
+) -> pd.Series:
+    """
+    Select a real historical year that best represents each cluster based on the minimum distance to the cluster center.
+
+    Parameters:
+        data (pd.DataFrame): The historical data with years as columns.
+        labels (np.ndarray): Cluster labels for each year.
+        cluster_centers (pd.DataFrame): Cluster centers.
+
+    Returns:
+        pd.Series: Representative year for each cluster.
+    """
+    representative_years = {}
+    for cluster in range(len(cluster_centers)):
+        cluster_members = data.columns[labels == cluster]
+        distances = [
+            np.linalg.norm(data[year].values - cluster_centers.loc[cluster].values)
+            for year in cluster_members
+        ]
+        best_year = cluster_members[np.argmin(distances)]
+        representative_years[cluster] = best_year
+    return pd.Series(representative_years)
+
+
+def select_representative_year_synthetic(cluster_centers: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create synthetic years as the cluster centers.
+
+    Parameters:
+        cluster_centers (pd.DataFrame): Cluster centers.
+
+    Returns:
+        pd.DataFrame: Synthetic years for each cluster.
+    """
+    return cluster_centers.T
+
+
+def assign_probabilities(labels: np.ndarray, n_clusters: int) -> pd.Series:
+    """
+    Calculate probabilities for each cluster based on the frequency of occurrence.
+
+    Parameters:
+        labels (np.ndarray): Cluster labels for each year.
+        n_clusters (int): Number of clusters.
+
+    Returns:
+        pd.Series: Probabilities for each cluster.
+    """
+    unique, counts = np.unique(labels, return_counts=True)
+    probabilities = counts / len(labels)
+    return pd.Series(probabilities, index=range(n_clusters))
+
+
+def run_reduced_scenarios(data: pd.DataFrame, n_clusters: int, method: str) -> pd.DataFrame:
+    """
+    Run the reduced scenarios algorithm to select representative years.
+    
+    Parameters:
+        data (pd.DataFrame): The historical data with years as columns.
+        n_clusters (int): Number of clusters to divide the data into.
+        method (str): Method to select representative years.
         
+    Returns:
+        pd.DataFrame: Representative years for each cluster.
+    """
+    
+    labels, cluster_centers = cluster_data(data, n_clusters)
+    probabilities = assign_probabilities(labels, n_clusters)
+
+    if method == "real":
+        representatives_years = select_representative_year_real(data, labels, cluster_centers)
+        representatives = data.loc[:, representatives_years]
+        representatives.columns = ['{} - {:.2f}'.format(i, probabilities[k]) for k, i in representatives_years.items()]
+    elif method == "synthetic":
+        representatives = select_representative_year_synthetic(cluster_centers)
+        representatives.columns = ['{} - {:.2f}'.format(i, probabilities[i]) for i in representatives.columns]
+    else:
+        raise ValueError("Invalid method")
+    
+    return representatives
+
+    
+def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Values", xlabel="Month", ymin=0, ymax=None, filename=None):
+    """
+    Plots the range of values (min to max) as a transparent grey area and highlights
+    the interquartile range (25th to 75th percentile) in darker grey.
+    
+    Parameters:
+    - df: DataFrame with months as the index and multiple years as columns.
+    - title: Title of the plot.
+    - ylabel: Label for the y-axis.
+    - xlabel: Label for the x-axis.
+    """
+    # Calculate min, max, and interquartile range
+    min_vals = df.min(axis=1)
+    max_vals = df.max(axis=1)
+    q25_vals = df.quantile(0.25, axis=1)
+    q75_vals = df.quantile(0.75, axis=1)
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Plot the full uncertainty range (min to max) as light grey
+    ax.fill_between(df.index, min_vals, max_vals, color='grey', alpha=0.3, label='Min-Max Range')
+    
+    # Plot the interquartile range (25th to 75th percentile) as darker grey
+    ax.fill_between(df.index, q25_vals, q75_vals, color='grey', alpha=0.6, label='25th-75th Percentile')
+    
+    if df2 is not None:
+        df2.plot(ax=ax)
+    
+    # Add labels, title, and legend
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel(xlabel)
+    ax.legend(loc='upper right')
+    
+    ax.set_ylim(bottom=ymin)
+    if ymax is not None:
+        ax.set_ylim(top=ymax)
+
+    # Show the plot
+    if filename is not None:
+        plt.savefig(filename, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.tight_layout()
+        plt.show()
