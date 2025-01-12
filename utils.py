@@ -22,8 +22,8 @@ import matplotlib.pyplot as plt
 
 
 API_TOKEN = '38bb40c2e0090463d92457a7bb87af45fdbba28b'
-
 nb_days = pd.Series([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], index=range(1, 13))
+
 
 def get_renewable_data(power_type, locations, start_date, end_date, api_token=API_TOKEN, dataset="merra2", capacity=1,
                        system_loss=0.1, height=100, tracking=0, tilt=35, azim=180,
@@ -264,7 +264,7 @@ def format_data_energy(filenames):
     return df_energy
 
 
-def find_special_days(df_energy):
+def find_special_days(df_energy, columns=None):
     """Find special days within the representative year.
     
     Parameters
@@ -276,11 +276,10 @@ def find_special_days(df_energy):
     -------
     special_days: pd.DataFrame
         DataFrame with the special days.
-    df_energy: pd.DataFrame
-        DataFrame without the special days.
     """
     # Find the special days within the representative year
-    columns = [i for i in df_energy.columns if i not in ['season', 'day', 'hour']]
+    if columns is None:
+        columns = [i for i in df_energy.columns if i not in ['season', 'day', 'hour']]
 
     special_days = {}
     for column in columns:
@@ -293,6 +292,7 @@ def find_special_days(df_energy):
         elif column in ['Load']:
             max_load = df_energy.groupby(['season', 'day'])[column].sum().unstack().idxmax(axis=1)
             max_load = list(max_load.items())
+            
             special_days.update({column: max_load})
         else:
             raise ValueError('Unknown column. Only implemented for: Wind, PV, ROR, Load.')
@@ -304,7 +304,7 @@ def find_special_days(df_energy):
     special_days = pd.concat((special_days, pd.Series(1, index=special_days.index)), keys=['days', 'weight'], axis=1)
     special_days = special_days.set_index('days').groupby('days').sum().reset_index()
     
-    return special_days, df_energy
+    return special_days
 
 
 def removed_special_days(df_energy, special_days):
@@ -549,47 +549,6 @@ def format_epm_demandprofile(df_energy, repr_days, folder, name_data=''):
     print('File saved at:', os.path.join(folder, 'pDemandProfile_{}.csv'.format(name_data)))
     
 
-def plot_repr_variable(df, day_level='daytype', season_level='season'):
-    fig, ax = plt.subplots()
-
-    df.plot(ax=ax)
-
-    # Adding the representative days and seasons
-    n_rep_days = len(df.index.get_level_values(day_level).unique())
-    dispatch_seasons = df.index.get_level_values(season_level).unique()
-    total_days = len(dispatch_seasons) * n_rep_days
-    y_max = ax.get_ylim()[1]
-
-    for d in range(total_days):
-        x_d = 24 * d
-
-        # Add vertical lines to separate days
-        is_end_of_season = d % n_rep_days == 0
-        linestyle = '-' if is_end_of_season else '--'
-        ax.axvline(x=x_d, color='slategrey', linestyle=linestyle, linewidth=0.8)
-
-        # Add day labels (d1, d2, ...)
-        ax.text(
-            x=x_d + 12,  # Center of the day (24 hours per day)
-            y=y_max * 0.99,
-            s=f'd{(d % n_rep_days) + 1}',
-            ha='center',
-            fontsize=7
-        )
-
-    # Add season labels
-    season_x_positions = [24 * n_rep_days * s + 12 * n_rep_days for s in range(len(dispatch_seasons))]
-    ax.set_xticks(season_x_positions)
-    ax.set_xticklabels(dispatch_seasons, fontsize=8)
-    ax.set_xlim(left=0, right=24 * total_days)
-
-    # Remove grid
-    ax.grid(False)
-    # Remove top spine to let days appear
-    ax.spines['top'].set_visible(False)
-    ax.set_xlabel('Hours')
-    plt.show()
-    
 
 def cluster_data(data: pd.DataFrame, n_clusters: int) -> Tuple[np.ndarray, pd.DataFrame]:
     """
@@ -738,3 +697,104 @@ def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Value
     else:
         plt.tight_layout()
         plt.show()
+        
+def format_dispatch_ax(ax, pd_index, day='day', season='season', display_day=True):
+
+    # Adding the representative days and seasons
+    n_rep_days = len(pd_index.get_level_values(day).unique())
+    dispatch_seasons = pd_index.get_level_values(season).unique()
+    total_days = len(dispatch_seasons) * n_rep_days
+    y_max = ax.get_ylim()[1]
+
+    if display_day:
+        for d in range(total_days):
+            x_d = 24 * d
+
+            # Add vertical lines to separate days
+            is_end_of_season = d % n_rep_days == 0
+            linestyle = '-' if is_end_of_season else '--'
+            ax.axvline(x=x_d, color='slategrey', linestyle=linestyle, linewidth=0.8)
+
+            # Add day labels (d1, d2, ...)
+            ax.text(
+                x=x_d + 12,  # Center of the day (24 hours per day)
+                y=y_max * 0.99,
+                s=f'd{(d % n_rep_days) + 1}',
+                ha='center',
+                fontsize=7
+            )
+
+    # Add season labels
+    season_x_positions = [24 * n_rep_days * s + 12 * n_rep_days for s in range(len(dispatch_seasons))]
+    ax.set_xticks(season_x_positions)
+    ax.set_xticklabels(dispatch_seasons, fontsize=8)
+    ax.set_xlim(left=0, right=24 * total_days)
+    ax.set_xlabel('Time')
+    # Remove grid
+    ax.grid(False)
+    # Remove top spine to let days appear
+    ax.spines['top'].set_visible(False)
+    
+def select_time_period(df, select_time):
+    """Select a specific time period in a dataframe.
+
+    Parameters
+    ----------
+    df: pd.DataFrame
+        Columns contain season and day
+    select_time: dict
+        For each key, specifies a subset of the dataframe
+        
+    Returns
+    -------
+    pd.DataFrame: Dataframe with the selected time period
+    str: String with the selected time period
+    """
+    temp = df.copy()
+    for k, i in select_time.items():
+        temp = temp.loc[temp.index.get_level_values(k).isin(i), :]
+    return temp
+
+
+def create_season_day_index() -> pd.Series:
+    """Create a MultiIndex with all combinations of seasons and days.
+    
+    Returns:
+    -------
+    pd.Series: Series with a MultiIndex of seasons and days.
+    """
+
+    # Create the levels for the MultiIndex
+    months = np.arange(1, 13)  # Months 1-12
+    days = np.arange(1, 32)  # Days 1-31
+
+    # Generate all combinations of months and days
+    month_day_combinations = [(month, day) for month in months for day in days]
+
+    # Filter invalid days (e.g., February 30, April 31)
+    valid_combinations = [
+        (month, day)
+        for month, day in month_day_combinations
+        if day <= pd.Timestamp(f"2025-{month:02d}-01").days_in_month
+    ]
+
+    # Create the MultiIndex
+    multi_index = pd.MultiIndex.from_tuples(valid_combinations, names=["season", "day"])
+
+    # Create the Series with 1 as the value everywhere
+    series = pd.Series(1, index=multi_index)
+
+    return series
+
+
+def plot_dispatch(df, day_level='daytype', season_level='season'):
+    
+    fig, ax = plt.subplots()
+
+    df.plot(ax=ax)
+
+    format_dispatch_ax(ax, df.index)
+    
+    ax.set_xlabel('Hours')
+    plt.show()
+    
