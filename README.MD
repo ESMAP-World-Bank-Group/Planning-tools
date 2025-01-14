@@ -60,5 +60,5 @@ conda install ipykernel
 Once the ipykernel package is installed, you can create a kernel for the environment:
 
 ```bash
-python -m ipykernel --name=esmap_env --display-name "Python (esmap_env)"
+python -m ipykernel install --user --name=esmap_env
 ```
