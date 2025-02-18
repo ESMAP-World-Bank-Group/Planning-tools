@@ -10,6 +10,8 @@ This project is part of the World Bank's initiative to analyze data input or out
 
 ### Representative Days
 
+This notebook is designed to determine representative days for a multi-year time series for energy demand and renewables generation.
+
 This project enables users to:
 - Download and parse renewables data from Renewables Ninja API.
 - Include additional data sources for energy demand or hydrogeneration.
@@ -25,6 +27,22 @@ The user can decide how many representative days to generate per season.
 `launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=2)`
 
 Finally, the code will merge the sepcial days with the representative day from the Poncelet algorithm and output the final representative days.
+
+### Representative Years
+
+This notebook is designed to determine representative years for hydrogeneration.
+
+This project enables users to:
+- Analyze hydrogeneration years
+- Apply rules such as seasonal average to represent reservoirs management
+- Find multiple representative years to be used in the optimization model
+- Compute with capacity to calculate pAvailability in EPM format
+- Export in .csv format
+
+### Load Analysis
+
+This notebook is designed to analyze the load curve and generate a smoothed load curve to use in EPM.
+
 
 ## Project Structure
 - `representative_days.ipynb`:  Notebook for representative_days. Copy and paste for your own project.

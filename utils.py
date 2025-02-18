@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from typing import Tuple, Union
 import matplotlib.pyplot as plt
-
+import calendar
 
 API_TOKEN = '38bb40c2e0090463d92457a7bb87af45fdbba28b'
 nb_days = pd.Series([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], index=range(1, 13))
@@ -651,7 +651,8 @@ def run_reduced_scenarios(data: pd.DataFrame, n_clusters: int, method: str) -> p
     return representatives
 
     
-def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Values", xlabel="Month", ymin=0, ymax=None, filename=None):
+def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Values", xlabel="Month", ymin=0, ymax=None, filename=None,
+                     convert_months=True):
     """
     Plots the range of values (min to max) as a transparent grey area and highlights
     the interquartile range (25th to 75th percentile) in darker grey.
@@ -665,6 +666,8 @@ def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Value
     # Calculate min, max, and interquartile range
     min_vals = df.min(axis=1)
     max_vals = df.max(axis=1)
+    q10_vals = df.quantile(0.10, axis=1)
+    q90_vals = df.quantile(0.90, axis=1)
     q25_vals = df.quantile(0.25, axis=1)
     q75_vals = df.quantile(0.75, axis=1)
     
@@ -674,11 +677,21 @@ def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Value
     # Plot the full uncertainty range (min to max) as light grey
     ax.fill_between(df.index, min_vals, max_vals, color='grey', alpha=0.3, label='Min-Max Range')
     
+        # Plot 10th-90th percentile in blue
+    ax.fill_between(df.index, q10_vals, q90_vals, color='grey', alpha=0.5, label='10th-90th Percentile')
+    
     # Plot the interquartile range (25th to 75th percentile) as darker grey
-    ax.fill_between(df.index, q25_vals, q75_vals, color='grey', alpha=0.6, label='25th-75th Percentile')
+    ax.fill_between(df.index, q25_vals, q75_vals, color='grey', alpha=0.9, label='25th-75th Percentile')
+    
     
     if df2 is not None:
         df2.plot(ax=ax)
+        
+    # Convert x-axis labels to month names if requested
+    if convert_months:
+        ax.set_xticks(df.index)
+        ax.set_xticklabels([calendar.month_abbr[m] for m in df.index], rotation=0)
+
     
     # Add labels, title, and legend
     ax.set_title(title)
