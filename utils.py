@@ -20,6 +20,12 @@ from sklearn.cluster import KMeans
 from typing import Tuple, Union
 import matplotlib.pyplot as plt
 import calendar
+import warnings
+
+import logging
+
+logging.basicConfig(level=logging.WARNING)  # Configure logging level
+logger = logging.getLogger(__name__)
 
 API_TOKEN = '38bb40c2e0090463d92457a7bb87af45fdbba28b'
 nb_days = pd.Series([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], index=range(1, 13))
@@ -29,7 +35,7 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
                        system_loss=0.1, height=100, tracking=0, tilt=35, azim=180,
                        turbine='Gamesa+G114+2000', local_time='true'):
     """Fetch solar or wind power data for multiple locations using the Renewables Ninja API.
-    
+
     Args:
     - api_token (str): Your Renewables Ninja API token.
     - power_type (str): 'solar' or 'wind'.
@@ -45,17 +51,17 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
     - azim (float): Azimuth angle for solar panels. Defaults to 180.
     - turbine (str): Turbine type for wind. Defaults to 'Vestas+V80+2000'.
     - local_time (bool): Whether to return data in local time. Defaults to True.
-    
+
     Returns:
     - dict: A dictionary of results for each location.
     """
     base_url = 'https://www.renewables.ninja/api/data/'
-    
+
     # Set headers for the API request
     headers = {
         'Authorization': f'Token {api_token}'
     }
-        
+
     # Track requests per minute
     requests_made = 0
     minute_start_time = time.time()
@@ -84,16 +90,16 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
                     'latitude': lat,
                     'longitude': lon,
                     'timestamp': pd.to_datetime(int(timestamp) / 1000, unit='s'),
-                    #'local_time': pd.to_datetime(int(local_time) / 1000, unit='s'),
+                    # 'local_time': pd.to_datetime(int(local_time) / 1000, unit='s'),
                     **values  # Unpack all the power generation data at that timestamp
                 }
                 all_data.append(row)
         else:
             print(f"Error fetching data for location ({lat}, {lon}): {response.status_code}")
-            
+
         # Track the request
         requests_made += 1
-        
+
         # If we hit 6 requests within a minute, we wait for the remaining time of that minute
         if requests_made >= 6:
             print('Waiting for a minute to not hit the API rate limit...')
@@ -106,17 +112,17 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
             # Reset the counter and timer
             requests_made = 0
             minute_start_time = time.time()
-    
+
     # Convert the collected data into a DataFrame
     df = pd.DataFrame(all_data)
     df.rename(columns={'electricity': power_type}, inplace=True)
-    return df
+    return df, requests_made
 
 
 def get_years_renewables(locations, power_type, start_year, end_year, start_day='01-01', end_day='12-31',
                          turbine='Gamesa+G114+2000', name_data='data', output='data'):
     """Get the renewable data for multiple years.
-    
+
     Parameters
     ----------
     locations: list
@@ -135,22 +141,24 @@ def get_years_renewables(locations, power_type, start_year, end_year, start_day=
         Turbine type for wind.
     name_data: str, optional, default 'data'
         Name of the data.
-    
+
     Returns
     -------
     results_concat: pd.DataFrame
         DataFrame with the energy data.
     """
-    
 
     results = {}
+    hour_start_time = time.time()
+    requests_tot = 0
     for year in range(start_year, end_year):
 
         start_date = '{}-{}'.format(year, start_day)
         end_date = '{}-{}'.format(year, end_day)
 
         # Call the function to get data
-        data = get_renewable_data(power_type, locations, start_date, end_date, turbine=turbine)
+        data, requests_made = get_renewable_data(power_type, locations, start_date, end_date, turbine=turbine)
+        requests_tot += requests_made
 
         if data.empty:
             print("No data for year {}".format(year))
@@ -158,7 +166,7 @@ def get_years_renewables(locations, power_type, start_year, end_year, start_day=
         else:
             print("Getting data {} for year {}".format(power_type, year))
             data.set_index(['latitude', 'longitude'], inplace=True)
-            data['local_time'] = pd.to_datetime(data['local_time'])
+            data['local_time'] = pd.to_datetime(data['local_time'], utc=True)
             data['season'] = data['local_time'].dt.month
             data['day'] = data['local_time'].dt.day
             data['hour'] = data['local_time'].dt.hour
@@ -168,6 +176,19 @@ def get_years_renewables(locations, power_type, start_year, end_year, start_day=
 
             results.update({year: data})
 
+        # If we hit 50 requests within an hour, we wait for the remaining time of that minute before continuing the requests
+        if requests_tot >= 49:
+            print('Waiting for a minute to not hit the API rate limit...')
+            elapsed_time = time.time() - hour_start_time
+            if elapsed_time < 3600:
+                sleep_time = 3600 - elapsed_time
+                print(f"Hit rate limit. Sleeping for {sleep_time:.2f} seconds.")
+                time.sleep(sleep_time)
+
+            # Reset the counter and timer
+            requests_tot = 0
+            hour_start_time = time.time()
+
     results_concat = pd.concat(results, axis=1)
     results_concat.to_csv(os.path.join(output, 'data_{}_{}.csv'.format(name_data, power_type)))
     return results_concat
@@ -175,14 +196,14 @@ def get_years_renewables(locations, power_type, start_year, end_year, start_day=
 
 def find_representative_year(df, method='average_profile'):
     """Find the representative year.
-    
+
     Parameters
     ----------
     df: pd.DataFrame
         DataFrame with the energy data.
     method: str, optional, default 'average_profile'
         Method to find the representative year.
-        
+
     Returns
     -------
     repr_year: int
@@ -210,9 +231,9 @@ def find_representative_year(df, method='average_profile'):
     return repr_year
 
 
-def format_data_energy(filenames):
+def format_data_energy(filenames, locations):
     """Format the data for the energy from .csv files.
-    
+
     Parameters
     ----------
     filenames: dict
@@ -228,50 +249,201 @@ def format_data_energy(filenames):
     df_energy = {}
     for key, item in filenames.items():
         filename, reading = item[0], item[1]
-        
-        # Extract from the data results 
+
+        # Extract from the data results
         if reading == 'renewable_ninja':
             df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3, 4, 5])
             repr_year = find_representative_year(df)
             # Format the data
             df = df.loc[:, repr_year]
+            df = df.reset_index()
+            df['zone'] = list(zip(df['latitude'], df['longitude']))  # Convert lat/lon to tuples
+            df['zone'] = df['zone'].map(locations)
         elif reading == 'standard':
-            df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2])
+            df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3])
             repr_year = find_representative_year(df)
+            df = df.reset_index()
         else:
             raise ValueError('Unknown reading. Only implemented for: renewable_ninja, standard.')
-        df = df.reset_index()
-        df = df.loc[:, ['season', 'day', 'hour', repr_year]].rename(columns={repr_year: key})
-        
+
+        df = df.loc[:, ['zone', 'season', 'day', 'hour', repr_year]].rename(columns={repr_year: key})
+        df = df.sort_values(by=['zone', 'season', 'day', 'hour'], ascending=True).reset_index(drop=True)
+
+        # If 2/29, remove it
+        if len(df.season.unique()) == 12:  # season expressed as months
+            df = df[~((df['season'] == 2) & (df['day'] == 29))]
+
         df_energy.update({key: df})
-        
+
     keys_to_merge = ['PV', 'Wind', 'Load', 'ROR']
     keys_to_merge = [i for i in keys_to_merge if i in df_energy.keys()]
 
     # Dynamically merge all DataFrames in df_energy based on the specified keys
     df_energy = reduce(
-        lambda left, right: pd.merge(left, right, on=['season', 'day', 'hour']),
+        lambda left, right: pd.merge(left, right, on=['zone', 'season', 'day', 'hour']),
         (df_energy[k] for k in keys_to_merge))
-    
-    # If 2/29, remove it
-    df_energy = df_energy[~((df_energy['season'] == 2) & (df_energy['day'] == 29))]
-    
+
+    if len(df_energy.season.unique()) == 12:  # only when seasons are the months, we remove the 29th of February
+        df_energy = df_energy[~((df_energy['season'] == 2) & (df_energy['day'] == 29))]
+
     if df_energy.isna().any().any():
         print('Warning: NaN values in the DataFrame')
 
-    print('Annual capacity factor (%):', df_energy[keys_to_merge].mean())
-    
+    print('Annual capacity factor (%):', df_energy.groupby('zone')[keys_to_merge].mean().reset_index())
+    if len(df_energy.zone.unique()) > 1:  # handling the case with multiple zones to rename columns
+        df_energy = df_energy.set_index(['zone', 'season', 'day', 'hour']).unstack('zone')
+        df_energy.columns = ['_'.join([idx0, idx1]) for idx0, idx1 in df_energy.columns]
+        df_energy = df_energy.reset_index()
+    else:
+        df_energy = df_energy.drop('zone', axis=1)
     return df_energy
+
+
+def cluster_data_new(df_energy, n_clusters=10, columns=None):
+    """
+    Perform KMeans clustering on selected energy features to identify representative days.
+
+    Parameters:
+        df_energy (pd.DataFrame): DataFrame containing energy data with columns ['season', 'day', 'hour', 'PV', 'Wind', 'Load'].
+        n_clusters (int): Number of clusters.
+        columns (list, optional): List of feature columns to use for clustering. Defaults to ['PV', 'Wind', 'Load'].
+
+    Returns:
+        pd.DataFrame: Representative days closest to cluster centroids.
+        pd.DataFrame: Cluster centers as a DataFrame.
+        pd.Series: Probabilities of each cluster based on frequency of occurrence.
+    """
+    # Select relevant columns for clustering
+    if columns is None:
+        columns = [i for i in df_energy.columns if i not in ['season', 'day', 'hour']]
+
+    # Find closest days to centroids
+    def find_closest_days(df, centroids, features):
+        closest_days = []
+        for i, centroid in enumerate(centroids):
+            # Compute Euclidean distance between each row and the centroid
+            distances = np.linalg.norm(df[features] - centroid, axis=1)
+            closest_idx = distances.argmin()  # Find index of closest day
+            closest_days.append(df.iloc[closest_idx])  # Store closest day
+        closest_days = pd.DataFrame(closest_days)
+        closest_days.index = range(len(centroids))
+        return closest_days
+
+    # Compute cluster probabilities
+    def assign_probabilities(labels: np.ndarray, n_clusters: int) -> pd.Series:
+        """
+        Calculate probabilities for each cluster based on frequency of occurrence.
+        """
+        unique, counts = np.unique(labels, return_counts=True)
+        probabilities = counts / len(labels)
+        return pd.Series(probabilities, index=range(n_clusters))
+
+    df_closest_days = []
+    centroids_df = []
+    df_tot = df_energy.copy()
+    for season, df_season in df_tot.groupby('season'):
+        df_season_cluster = df_season.copy()
+        df_season_cluster = df_season_cluster.groupby(['season', 'day'])[columns].sum().reset_index()
+
+        # Apply KMeans clustering
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        df_season_cluster['Cluster'] = kmeans.fit_predict(df_season_cluster[columns])
+        df_tot = df_tot.merge(df_season_cluster[['season', 'day', 'Cluster']], on=['season', 'day'], how='left',
+                              suffixes=('', '_temp'))
+
+        # Fill only missing values in df_tot['Cluster']
+        if 'Cluster_temp' in df_tot.columns:
+            df_tot['Cluster'] = df_tot['Cluster'].combine_first(df_tot['Cluster_temp'])
+            df_tot = df_tot.drop(['Cluster_temp'], axis=1)
+
+        # Extract cluster centers
+        cluster_centers = pd.DataFrame(kmeans.cluster_centers_, columns=columns, index=range(n_clusters))
+        cluster_probabilities = assign_probabilities(df_season_cluster['Cluster'].values, n_clusters)
+        centroids = pd.concat([cluster_probabilities.to_frame().rename(columns={0: 'probability'}), cluster_centers],
+                              axis=1)
+        centroids['season'] = season
+        centroids = centroids.reset_index().rename(columns={'index': 'Cluster'})
+        centroids_df.append(centroids)
+
+        df_closest_days.append(find_closest_days(df_season_cluster, cluster_centers.values, columns))
+
+    df_closest_days, centroids_df = pd.concat(df_closest_days, axis=0, ignore_index=True), pd.concat(centroids_df,
+                                                                                                     axis=0,
+                                                                                                     ignore_index=True)
+    df_closest_days = df_closest_days.merge(centroids_df[['Cluster', 'probability', 'season']],
+                                            on=['Cluster', 'season'], how='left')
+    return df_tot, df_closest_days, centroids_df
+
+
+def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
+    """
+    Defines special days based on clustering results. Clusters representing a large share of the data are excluded by
+    definition, and will be accounted for in the Poncelet algorithm.
+    Args:
+        df_closest_days: pd.DataFrame
+            Closest days in the data to the cluster centroids
+        df_tot: pd.DataFrame
+            Total data including all time series
+        threshold: float
+            Probability threshold to exclude large clusters
+
+    Returns:
+
+    """
+    df_tot = df_tot.copy()
+    special_days = []
+    indices_to_remove = set()
+    for season, df_season in df_closest_days.groupby('season'):
+        # first special day is based on minimum PV production across all zones
+        PV_columns = [col for col in df_season.columns if 'PV' in col]
+        if len(PV_columns) > 0:
+            df_season = df_season[df_season['probability'] < threshold].copy()
+            df_season.loc[:, 'PV'] = df_season.loc[:, PV_columns].sum(axis=1)
+            low_pv_cluster = df_season.nsmallest(1, 'PV')
+            cluster_id = low_pv_cluster['Cluster'].values[0]
+            special_day = tuple(low_pv_cluster[['season', 'day']].values[0])
+            cluster_weight = (df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].shape[0]) // 24
+            special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
+            indices_to_remove.update(df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].index)
+
+        # second special day is based on minimum Wind production across all zones
+        wind_columns = [col for col in df_season.columns if 'Wind' in col]
+        if len(wind_columns) > 0:
+            df_season = df_season[df_season['probability'] < threshold]
+            df_season.loc[:, 'Wind'] = df_season.loc[:, wind_columns].sum(axis=1)
+            low_wind_cluster = df_season.nsmallest(1, 'Wind')
+            cluster_id = low_wind_cluster['Cluster'].values[0]
+            special_day = tuple(low_wind_cluster[['season', 'day']].values[0])
+            if special_day not in {entry['days'] for entry in special_days}:
+                cluster_weight = (df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].shape[
+                    0]) // 24
+                special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
+            else:  # ensuring to add another representative day with low wind if already included
+                low_wind_cluster = df_season.nsmallest(2, 'Wind').iloc[-1:]
+                cluster_id = low_wind_cluster['Cluster'].values[0]
+                special_day = tuple(low_wind_cluster[['season', 'day']].values[0])
+                cluster_weight = (df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].shape[
+                    0]) // 24
+                special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
+            indices_to_remove.update(df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].index)
+
+    # Convert special days to DataFrame
+    df_special_days = pd.DataFrame(special_days)
+    df_special_days = df_special_days.drop_duplicates()
+    df_tot = df_tot.drop(index=indices_to_remove)
+    df_tot = df_tot.drop(columns=['Cluster'])  # no longer needed
+
+    return df_special_days, df_tot
 
 
 def find_special_days(df_energy, columns=None):
     """Find special days within the representative year.
-    
+
     Parameters
     ----------
     df_energy: pd.DataFrame
         DataFrame with the energy data.
-        
+
     Returns
     -------
     special_days: pd.DataFrame
@@ -287,23 +459,22 @@ def find_special_days(df_energy, columns=None):
         if column in ['Wind', 'PV', 'ROR']:
             min_prod = df_energy.groupby(['season', 'day'])[column].sum().unstack().idxmin(axis=1)
             min_prod = list(min_prod.items())
-            
+
             special_days.update({column: min_prod})
         elif column in ['Load']:
             max_load = df_energy.groupby(['season', 'day'])[column].sum().unstack().idxmax(axis=1)
             max_load = list(max_load.items())
-            
+
             special_days.update({column: max_load})
         else:
             raise ValueError('Unknown column. Only implemented for: Wind, PV, ROR, Load.')
-        
 
     # Format special days
     special_days = sorted([item for sublist in special_days.values() for item in sublist])
     special_days = pd.Series(special_days)
     special_days = pd.concat((special_days, pd.Series(1, index=special_days.index)), keys=['days', 'weight'], axis=1)
-    special_days = special_days.set_index('days').groupby('days').sum().reset_index()
-    
+    special_days = special_days.set_index('days').groupby('days').first().reset_index()
+
     return special_days
 
 
@@ -311,14 +482,14 @@ def removed_special_days(df_energy, special_days):
     # Remove all lines in dict_info
     for special_day in special_days['days']:
         df_energy = df_energy[~((df_energy['season'] == special_day[0]) & (df_energy['day'] == special_day[1]))]
-        
+
     return df_energy
 
 
 def calculate_pairwise_correlation(df):
     """ Calculate correlation between all columns in a DataFrame on a row-by-row basis,
     and store the result in a new column for each pair.
-    
+
     Parameters
     ----------
     df: pd.DataFrame
@@ -328,7 +499,7 @@ def calculate_pairwise_correlation(df):
 
     # Iterate through all pairs of columns
     for i, col1 in enumerate(columns):
-        for col2 in columns[i+1:]:
+        for col2 in columns[i + 1:]:
             # Calculate the correlation for each row
             corr_col_name = f"{col1}{col2}corr"
             df[corr_col_name] = (df[col1] - df[col1].mean()) * (df[col2] - df[col2].mean())
@@ -338,7 +509,7 @@ def calculate_pairwise_correlation(df):
 
 def format_optim_repr_days(df_energy, name_data, folder_process_data):
     """Format the data for the optimization.
-    
+
     Parameters
     ----------
     df_energy: pd.DataFrame
@@ -353,21 +524,23 @@ def format_optim_repr_days(df_energy, name_data, folder_process_data):
     df_formatted_optim = calculate_pairwise_correlation(df_formatted_optim)
     df_formatted_optim.set_index(['season', 'day', 'hour'], inplace=True)
     df_formatted_optim.index.names = [''] * 3
-    # Add header to the DataFrame with the name of the zone
-    df_formatted_optim = pd.concat([df_formatted_optim], keys=[name_data], axis=1)
-    # Invert the order of levels
-    df_formatted_optim = df_formatted_optim.swaplevel(0, 1, axis=1)
-    
+    # TODO: check this, currently removing zone
+    # # Add header to the DataFrame with the name of the zone
+    # df_formatted_optim = pd.concat([df_formatted_optim], keys=[name_data], axis=1)
+    # # Invert the order of levels
+    # df_formatted_optim = df_formatted_optim.swaplevel(0, 1, axis=1)
+
     path_data_file = os.path.join(folder_process_data, 'data_formatted_optim_{}.csv'.format(name_data))
     df_formatted_optim.to_csv(path_data_file, index=True)
     print('File saved at:', path_data_file)
-    
+
     return df_formatted_optim, path_data_file
 
 
-def launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=3):
+def launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=3,
+                           gams_model='OptimizationModel', bins_settings='settings_bins30'):
     """Launch the representative dyas optimization.
-    
+
     Parameters
     ----------
     path_data_file: str
@@ -375,43 +548,42 @@ def launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=3):
     folder_process_data: str
         Path to save the .gms file.
     """
-    
-    path_main_file = os.path.join(os.getcwd(),'gams/OptimizationModel.gms')
-    path_setting_file = os.path.join(os.getcwd(),'gams/settings.csv')
+
+    path_main_file = os.path.join(os.getcwd(), f'gams/{gams_model}.gms')
+    path_setting_file = os.path.join(os.getcwd(), f'gams/{bins_settings}.csv')
     path_data_file = os.path.join(os.getcwd(), path_data_file)
 
     if os.path.isfile(path_main_file) and os.path.isfile(path_data_file):
         command = ["gams", path_main_file] + ["--data {}".format(path_data_file),
-                                            "--settings {}".format(path_setting_file),
-                                            "--N {}".format(nbr_days)]
+                                              "--settings {}".format(path_setting_file),
+                                              "--N {}".format(nbr_days)]
     else:
         raise ValueError('Gams file or data file not found')
 
-    # Print the command    
+    # Print the command
     cwd = os.path.join(os.getcwd(), folder_process_data)
     print('Launch GAMS code')
     subprocess.run(command, cwd=cwd, stdout=subprocess.DEVNULL)
     print('End GAMS code')
 
-    
-    # TODO: Check if the results exist 
+    # TODO: Check if the results exist
 
 
 def parse_repr_days(folder_process_data, special_days):
     """Parse the results of the optimization.
-    
+
     Parameters
     ----------
     folder_process_data: str
         Path to the folder with the results.
     special_days: pd.DataFrame
         DataFrame with the special days.
-        
+
     Returns
     -------
     repr_days: pd.DataFrame
     """
-    
+
     def extract_gdx(file):
         """
         Extract information as pandas DataFrame from a gdx file.
@@ -433,24 +605,26 @@ def parse_repr_days(folder_process_data, special_days):
                 df[param.name] = container.data[param.name].records.copy()
 
         return df
-    
+
     # Extract the results
     results_optim = extract_gdx(os.path.join(folder_process_data, 'Results.gdx'))
 
     # From gdx result to pandas DataFrame
     weight = results_optim['w'].copy()
-    weight = weight[weight['level'] != 0]
+    weight = weight[~np.isclose(weight['level'], 0, atol=1e-6)]
 
     repr_days = pd.concat((
         weight.apply(lambda x: (x['s'], x['d']), axis=1),
         weight['level']), keys=['days', 'weight'], axis=1)
+
+    repr_days['weight'] = repr_days['weight'].round().astype(int)
 
     # Add special days
     repr_days = pd.concat((special_days, repr_days), axis=0, ignore_index=True)
 
     print('Number of days: {}'.format(repr_days.shape[0]))
     print('Total weight: {}'.format(repr_days['weight'].sum()))
-    
+
     # Format the data
     repr_days['season'] = repr_days['days'].apply(lambda x: x[0])
     repr_days['day'] = repr_days['days'].apply(lambda x: x[1])
@@ -459,15 +633,15 @@ def parse_repr_days(folder_process_data, special_days):
     repr_days = repr_days.astype({'season': int, 'day': int, 'weight': float})
     repr_days.sort_values(['season', 'weight'], inplace=True)
     repr_days['daytype'] = repr_days.groupby('season').cumcount() + 1
-    
+
     print(repr_days.groupby('season')['weight'].sum())
-    
+
     return repr_days
 
 
 def format_epm_phours(repr_days, folder, name_data=''):
     """Format pHours EPM like.
-    
+
     Parameters
     ----------
     repr_days: pd.DataFrame
@@ -477,17 +651,18 @@ def format_epm_phours(repr_days, folder, name_data=''):
     """
     repr_days_formatted_epm = repr_days.copy()
     repr_days_formatted_epm = repr_days.set_index(['season', 'daytype'])['weight'].squeeze()
-    repr_days_formatted_epm = pd.concat([repr_days_formatted_epm] * 24, keys=['t{:02d}'.format(i) for i in range(1, 25)], names=['hour'], axis=1)
-    
+    repr_days_formatted_epm = pd.concat([repr_days_formatted_epm] * 24,
+                                        keys=['t{:02d}'.format(i) for i in range(1, 25)], names=['hour'], axis=1)
+
     path_file = os.path.join(folder, 'pHours_{}.csv'.format(name_data))
     repr_days_formatted_epm.to_csv(path_file)
     print('File saved at:', path_file)
     print('Number of hours: {:.0f}'.format(repr_days_formatted_epm.sum().sum() / len(repr_days_formatted_epm.columns)))
-    
-    
+
+
 def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
     """Format pVREProfile EPM like
-    
+
     Parameters
     ----------
     df_energy: pd.DataFrame
@@ -499,29 +674,34 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
     """
     pVREProfile = df_energy.copy()
     pVREProfile = pVREProfile.set_index(['season', 'day', 'hour'])
-    pVREProfile = pVREProfile[[i for i in ['PV', 'Wind'] if i in df_energy.columns]]
-    pVREProfile.columns.names = ['Power']
+    pVREProfile = pVREProfile[[col for col in df_energy.columns if (('PV' in col) or ('Wind' in col))]]
+    pVREProfile.columns = pd.MultiIndex.from_tuples([tuple(col.split('_')) for col in pVREProfile.columns])
+    if pVREProfile.columns.nlevels == 1:
+        pVREProfile.columns = pd.MultiIndex.from_tuples([(col[0], name_data) for col in pVREProfile.columns])
+    pVREProfile.columns.names = ['Power', 'zone']
+
     t = repr_days.set_index(['season', 'day'])
     pVREProfile = pVREProfile.unstack('hour')
     # select only the representative days
     pVREProfile = pVREProfile.loc[t.index, :]
-    pVREProfile = pVREProfile.stack('Power')
-    pVREProfile = pd.merge(pVREProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(['season', 'daytype', 'Power'])
+    pVREProfile = pVREProfile.stack(level=['Power', 'zone'])
+    pVREProfile = pd.merge(pVREProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(
+        ['zone', 'season', 'daytype', 'Power'])
     pVREProfile.drop(['day', 'weight'], axis=1, inplace=True)
-    pVREProfile = pd.concat([pVREProfile], keys=[name_data], names=['zone'], axis=0)
-    
+    # pVREProfile = pd.concat([pVREProfile], keys=[name_data], names=['zone'], axis=0)
+
     pVREProfile.columns = ['t{:02d}'.format(i + 1) for i in pVREProfile.columns]
-    
+
     # Reorder index names
     pVREProfile = pVREProfile.reorder_levels(['zone', 'Power', 'season', 'daytype'], axis=0)
-    
-    pVREProfile.to_csv(os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)))
+
+    pVREProfile.to_csv(os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)), float_format='%.5f')
     print('File saved at:', os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)))
-    
+
 
 def format_epm_demandprofile(df_energy, repr_days, folder, name_data=''):
     """Format pDemandProfile EPM like
-    
+
     Parameters
     ----------
     df_energy: pd.DataFrame
@@ -534,20 +714,20 @@ def format_epm_demandprofile(df_energy, repr_days, folder, name_data=''):
     pDemandProfile = df_energy.copy()
     pDemandProfile = pDemandProfile.set_index(['season', 'day', 'hour'])
     pDemandProfile = pDemandProfile['Load'].squeeze()
-   # pVREProfile.index.names = ['season', 'day', 'hour']
+    # pVREProfile.index.names = ['season', 'day', 'hour']
     t = repr_days.set_index(['season', 'day'])
     pDemandProfile = pDemandProfile.unstack('hour')
     # select only the representative days
     pDemandProfile = pDemandProfile.loc[t.index, :]
-    pDemandProfile = pd.merge(pDemandProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(['season', 'daytype'])
+    pDemandProfile = pd.merge(pDemandProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(
+        ['season', 'daytype'])
     pDemandProfile.drop(['day', 'weight'], axis=1, inplace=True)
     pDemandProfile = pd.concat([pDemandProfile], keys=[name_data], names=['zone'], axis=0)
-    
+
     pDemandProfile.columns = ['t{:02d}'.format(i + 1) for i in pDemandProfile.columns]
-    
+
     pDemandProfile.to_csv(os.path.join(folder, 'pDemandProfile_{}.csv'.format(name_data)))
     print('File saved at:', os.path.join(folder, 'pDemandProfile_{}.csv'.format(name_data)))
-    
 
 
 def cluster_data(data: pd.DataFrame, n_clusters: int) -> Tuple[np.ndarray, pd.DataFrame]:
@@ -568,7 +748,7 @@ def cluster_data(data: pd.DataFrame, n_clusters: int) -> Tuple[np.ndarray, pd.Da
 
 
 def select_representative_year_real(
-    data: pd.DataFrame, labels: np.ndarray, cluster_centers: pd.DataFrame
+        data: pd.DataFrame, labels: np.ndarray, cluster_centers: pd.DataFrame
 ) -> pd.Series:
     """
     Select a real historical year that best represents each cluster based on the minimum distance to the cluster center.
@@ -625,16 +805,16 @@ def assign_probabilities(labels: np.ndarray, n_clusters: int) -> pd.Series:
 def run_reduced_scenarios(data: pd.DataFrame, n_clusters: int, method: str) -> pd.DataFrame:
     """
     Run the reduced scenarios algorithm to select representative years.
-    
+
     Parameters:
         data (pd.DataFrame): The historical data with years as columns.
         n_clusters (int): Number of clusters to divide the data into.
         method (str): Method to select representative years.
-        
+
     Returns:
         pd.DataFrame: Representative years for each cluster.
     """
-    
+
     labels, cluster_centers = cluster_data(data, n_clusters)
     probabilities = assign_probabilities(labels, n_clusters)
 
@@ -647,16 +827,17 @@ def run_reduced_scenarios(data: pd.DataFrame, n_clusters: int, method: str) -> p
         representatives.columns = ['{} - {:.2f}'.format(i, probabilities[i]) for i in representatives.columns]
     else:
         raise ValueError("Invalid method")
-    
+
     return representatives
 
-    
-def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Values", xlabel="Month", ymin=0, ymax=None, filename=None,
+
+def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Values", xlabel="Month", ymin=0, ymax=None,
+                     filename=None,
                      convert_months=True):
     """
     Plots the range of values (min to max) as a transparent grey area and highlights
     the interquartile range (25th to 75th percentile) in darker grey.
-    
+
     Parameters:
     - df: DataFrame with months as the index and multiple years as columns.
     - title: Title of the plot.
@@ -670,35 +851,33 @@ def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Value
     q90_vals = df.quantile(0.90, axis=1)
     q25_vals = df.quantile(0.25, axis=1)
     q75_vals = df.quantile(0.75, axis=1)
-    
+
     # Create the plot
     fig, ax = plt.subplots(figsize=(12, 6))
-    
+
     # Plot the full uncertainty range (min to max) as light grey
     ax.fill_between(df.index, min_vals, max_vals, color='grey', alpha=0.3, label='Min-Max Range')
-    
-        # Plot 10th-90th percentile in blue
+
+    # Plot 10th-90th percentile in blue
     ax.fill_between(df.index, q10_vals, q90_vals, color='grey', alpha=0.5, label='10th-90th Percentile')
-    
+
     # Plot the interquartile range (25th to 75th percentile) as darker grey
     ax.fill_between(df.index, q25_vals, q75_vals, color='grey', alpha=0.9, label='25th-75th Percentile')
-    
-    
+
     if df2 is not None:
         df2.plot(ax=ax)
-        
+
     # Convert x-axis labels to month names if requested
     if convert_months:
         ax.set_xticks(df.index)
         ax.set_xticklabels([calendar.month_abbr[m] for m in df.index], rotation=0)
 
-    
     # Add labels, title, and legend
     ax.set_title(title)
     ax.set_ylabel(ylabel)
     ax.set_xlabel(xlabel)
     ax.legend(loc='upper right')
-    
+
     ax.set_ylim(bottom=ymin)
     if ymax is not None:
         ax.set_ylim(top=ymax)
@@ -710,9 +889,9 @@ def plot_uncertainty(df, df2=None, title="Uncertainty Range Plot", ylabel="Value
     else:
         plt.tight_layout()
         plt.show()
-        
-def format_dispatch_ax(ax, pd_index, day='day', season='season', display_day=True):
 
+
+def format_dispatch_ax(ax, pd_index, day='day', season='season', display_day=True):
     # Adding the representative days and seasons
     n_rep_days = len(pd_index.get_level_values(day).unique())
     dispatch_seasons = pd_index.get_level_values(season).unique()
@@ -747,7 +926,8 @@ def format_dispatch_ax(ax, pd_index, day='day', season='season', display_day=Tru
     ax.grid(False)
     # Remove top spine to let days appear
     ax.spines['top'].set_visible(False)
-    
+
+
 def select_time_period(df, select_time):
     """Select a specific time period in a dataframe.
 
@@ -757,7 +937,7 @@ def select_time_period(df, select_time):
         Columns contain season and day
     select_time: dict
         For each key, specifies a subset of the dataframe
-        
+
     Returns
     -------
     pd.DataFrame: Dataframe with the selected time period
@@ -771,7 +951,7 @@ def select_time_period(df, select_time):
 
 def create_season_day_index() -> pd.Series:
     """Create a MultiIndex with all combinations of seasons and days.
-    
+
     Returns:
     -------
     pd.Series: Series with a MultiIndex of seasons and days.
@@ -800,14 +980,15 @@ def create_season_day_index() -> pd.Series:
     return series
 
 
-def plot_dispatch(df, day_level='daytype', season_level='season'):
-    
+def plot_dispatch(df, day_level='daytype', season_level='season', title=None):
     fig, ax = plt.subplots()
 
     df.plot(ax=ax)
 
     format_dispatch_ax(ax, df.index)
-    
+
     ax.set_xlabel('Hours')
+    ax.set_ylim(bottom=0)
+    if title is not None:
+        ax.set_title(title)
     plt.show()
-    
