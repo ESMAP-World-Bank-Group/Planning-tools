@@ -686,6 +686,11 @@ def parse_repr_days(folder_process_data, special_days):
     repr_days.sort_values(['season'], inplace=True)
     repr_days['daytype'] = repr_days.groupby('season').cumcount() + 1
 
+    repr_days['season'] = repr_days['season'].apply(lambda x: f'Q{x}')
+
+    # Update daytype naming to d1, d2...
+    repr_days['daytype'] = repr_days['daytype'].apply(lambda x: f'd{x}')
+
     print(repr_days.groupby('season')['weight'].sum())
 
     return repr_days
@@ -702,9 +707,9 @@ def format_epm_phours(repr_days, folder, name_data=''):
         Path to save the file.
     """
     repr_days_formatted_epm = repr_days.copy()
-    repr_days_formatted_epm = repr_days.set_index(['season', 'daytype'])['weight'].squeeze()
+    repr_days_formatted_epm = repr_days_formatted_epm.set_index(['season', 'daytype'])['weight'].squeeze()
     repr_days_formatted_epm = pd.concat([repr_days_formatted_epm] * 24,
-                                        keys=['t{:02d}'.format(i) for i in range(1, 25)], names=['hour'], axis=1)
+                                        keys=['t{}'.format(i) for i in range(1, 25)], names=['hour'], axis=1)
 
     path_file = os.path.join(folder, 'pHours_{}.csv'.format(name_data))
     repr_days_formatted_epm.to_csv(path_file)
@@ -725,27 +730,30 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
         Name of the zone.
     """
     pVREProfile = df_energy.copy()
+    pVREProfile['season'] = pVREProfile['season'].apply(lambda x: f'Q{x}')
+
     pVREProfile = pVREProfile.set_index(['season', 'day', 'hour'])
     pVREProfile = pVREProfile[[col for col in df_energy.columns if (('PV' in col) or ('Wind' in col))]]
     pVREProfile.columns = pd.MultiIndex.from_tuples([tuple(col.split('_')) for col in pVREProfile.columns])
     if pVREProfile.columns.nlevels == 1:
         pVREProfile.columns = pd.MultiIndex.from_tuples([(col[0], name_data) for col in pVREProfile.columns])
-    pVREProfile.columns.names = ['Power', 'zone']
+    pVREProfile.columns.names = ['fuel', 'zone']
 
-    t = repr_days.set_index(['season', 'day'])
+    t = repr_days.copy()
+    t = t.set_index(['season', 'day'])
     pVREProfile = pVREProfile.unstack('hour')
     # select only the representative days
     pVREProfile = pVREProfile.loc[t.index, :]
-    pVREProfile = pVREProfile.stack(level=['Power', 'zone'])
+    pVREProfile = pVREProfile.stack(level=['fuel', 'zone'])
     pVREProfile = pd.merge(pVREProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(
-        ['zone', 'season', 'daytype', 'Power'])
+        ['zone', 'season', 'daytype', 'fuel'])
     pVREProfile.drop(['day', 'weight'], axis=1, inplace=True)
     # pVREProfile = pd.concat([pVREProfile], keys=[name_data], names=['zone'], axis=0)
 
-    pVREProfile.columns = ['t{:02d}'.format(i + 1) for i in pVREProfile.columns]
+    pVREProfile.columns = ['t{}'.format(i + 1) for i in pVREProfile.columns]
 
     # Reorder index names
-    pVREProfile = pVREProfile.reorder_levels(['zone', 'Power', 'season', 'daytype'], axis=0)
+    pVREProfile = pVREProfile.reorder_levels(['zone', 'fuel', 'season', 'daytype'], axis=0)
 
     pVREProfile.to_csv(os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)), float_format='%.5f')
     print('File saved at:', os.path.join(folder, 'pVREProfile_{}.csv'.format(name_data)))
@@ -764,6 +772,7 @@ def format_epm_demandprofile(df_energy, repr_days, folder, name_data=''):
         Name of the zone.
     """
     pDemandProfile = df_energy.copy()
+    pDemandProfile['season'] = pDemandProfile['season'].apply(lambda x: f'Q{x}')
     pDemandProfile = pDemandProfile.set_index(['season', 'day', 'hour'])
     pDemandProfile = pDemandProfile['Load'].squeeze()
     # pVREProfile.index.names = ['season', 'day', 'hour']
@@ -776,7 +785,7 @@ def format_epm_demandprofile(df_energy, repr_days, folder, name_data=''):
     pDemandProfile.drop(['day', 'weight'], axis=1, inplace=True)
     pDemandProfile = pd.concat([pDemandProfile], keys=[name_data], names=['zone'], axis=0)
 
-    pDemandProfile.columns = ['t{:02d}'.format(i + 1) for i in pDemandProfile.columns]
+    pDemandProfile.columns = ['t{}'.format(i + 1) for i in pDemandProfile.columns]
 
     pDemandProfile.to_csv(os.path.join(folder, 'pDemandProfile_{}.csv'.format(name_data)))
     print('File saved at:', os.path.join(folder, 'pDemandProfile_{}.csv'.format(name_data)))
