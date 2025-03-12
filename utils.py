@@ -306,7 +306,7 @@ def cluster_data_new(df_energy, n_clusters=10, columns=None):
     Parameters:
         df_energy (pd.DataFrame): DataFrame containing energy data with columns ['season', 'day', 'hour', 'PV', 'Wind', 'Load'].
         n_clusters (int): Number of clusters.
-        columns (list, optional): List of feature columns to use for clustering. Defaults to ['PV', 'Wind', 'Load'].
+        columns (list, optional): List of feature columns to use for clustering.
 
     Returns:
         pd.DataFrame: Representative days closest to cluster centroids.
@@ -395,46 +395,55 @@ def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
     indices_to_remove = set()
     for season, df_season in df_closest_days.groupby('season'):
         # first special day is based on minimum PV production across all zones
-        PV_columns = [col for col in df_season.columns if 'PV' in col]
-        if len(PV_columns) > 0:
-            df_season = df_season[df_season['probability'] < threshold].copy()
-            df_season.loc[:, 'PV'] = df_season.loc[:, PV_columns].sum(axis=1)
-            low_pv_cluster = df_season.nsmallest(1, 'PV')
-            cluster_id = low_pv_cluster['Cluster'].values[0]
-            special_day = tuple(low_pv_cluster[['season', 'day']].values[0])
-            cluster_weight = (df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].shape[0]) // 24
-            special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
-            indices_to_remove.update(df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].index)
+        add_special_days(feature='PV', df=df_season, df_days=df_tot, season=season, special_days=special_days,
+                         indices_to_remove=indices_to_remove, rule='min', threshold=0.07)
 
         # second special day is based on minimum Wind production across all zones
-        wind_columns = [col for col in df_season.columns if 'Wind' in col]
-        if len(wind_columns) > 0:
-            df_season = df_season[df_season['probability'] < threshold]
-            df_season.loc[:, 'Wind'] = df_season.loc[:, wind_columns].sum(axis=1)
-            low_wind_cluster = df_season.nsmallest(1, 'Wind')
-            cluster_id = low_wind_cluster['Cluster'].values[0]
-            special_day = tuple(low_wind_cluster[['season', 'day']].values[0])
-            if special_day not in {entry['days'] for entry in special_days}:
-                cluster_weight = (df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].shape[
-                    0]) // 24
-                special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
-            else:  # ensuring to add another representative day with low wind if already included
-                low_wind_cluster = df_season.nsmallest(2, 'Wind').iloc[-1:]
-                cluster_id = low_wind_cluster['Cluster'].values[0]
-                special_day = tuple(low_wind_cluster[['season', 'day']].values[0])
-                cluster_weight = (df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].shape[
-                    0]) // 24
-                special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
-            indices_to_remove.update(df_tot[(df_tot['season'] == season) & (df_tot['Cluster'] == cluster_id)].index)
+        add_special_days(feature='Wind', df=df_season, df_days=df_tot, season=season, special_days=special_days,
+                         indices_to_remove=indices_to_remove, rule='min', threshold=0.07)
+
+        # second special day is based on maximum peak demand across all zones
+        add_special_days(feature='Load', df=df_season, df_days=df_tot, season=season, special_days=special_days,
+                         indices_to_remove=indices_to_remove, rule='max', threshold=0.07)
+
 
     # Convert special days to DataFrame
     df_special_days = pd.DataFrame(special_days)
     df_special_days = df_special_days.drop_duplicates()
-    df_tot = df_tot.drop(index=indices_to_remove)
+    df_tot = df_tot.drop(index=indices_to_remove)  # we remove the days corresponding to clusters which have been included as special days
     df_tot = df_tot.drop(columns=['Cluster'])  # no longer needed
 
     return df_special_days, df_tot
 
+
+def add_special_days(feature, df, df_days, season, special_days, indices_to_remove, rule='min', threshold=0.07):
+    assert rule in ['min', 'max'], "Rule for selecting cluster should be either 'min' or 'max'."
+    columns = [col for col in df.columns if feature in col]
+    if len(columns) > 0:
+        df = df[df['probability'] < threshold]
+        df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
+        if rule == 'min':
+            cluster = df.nsmallest(1, feature)
+        else:
+            cluster = df.nlargest(1, feature)
+        cluster_id = cluster['Cluster'].values[0]
+        special_day = tuple(cluster[['season', 'day']].values[0])
+        if special_day not in {entry['days'] for entry in special_days}:
+            cluster_weight = (df_days[(df_days['season'] == season) & (df_days['Cluster'] == cluster_id)].shape[
+                0]) // 24
+            special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
+        else:  # ensuring to add another representative day with extreme characteristics, if already included through previous features
+            if rule == 'min':
+                cluster = df.nsmallest(2, feature).iloc[-1:]
+            else:
+                cluster = df.nlargest(2, feature).iloc[-1:]
+            cluster_id = cluster['Cluster'].values[0]
+            special_day = tuple(cluster[['season', 'day']].values[0])
+            cluster_weight = (df_days[(df_days['season'] == season) & (df_days['Cluster'] == cluster_id)].shape[
+                0]) // 24
+            special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
+        indices_to_remove.update(df_days[(df_days['season'] == season) & (df_days['Cluster'] == cluster_id)].index)
+    return special_days
 
 def find_special_days(df_energy, columns=None):
     """Find special days within the representative year.
@@ -631,7 +640,7 @@ def parse_repr_days(folder_process_data, special_days):
     repr_days.drop(columns=['days'], inplace=True)
     repr_days = repr_days.loc[:, ['season', 'day', 'weight']]
     repr_days = repr_days.astype({'season': int, 'day': int, 'weight': float})
-    repr_days.sort_values(['season', 'weight'], inplace=True)
+    repr_days.sort_values(['season'], inplace=True)
     repr_days['daytype'] = repr_days.groupby('season').cumcount() + 1
 
     print(repr_days.groupby('season')['weight'].sum())
