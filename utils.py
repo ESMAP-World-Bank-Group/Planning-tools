@@ -254,6 +254,7 @@ def format_data_energy(filenames, locations):
         if reading == 'renewable_ninja':
             df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3, 4, 5])
             repr_year = find_representative_year(df)
+            print('Representative year {}'.format(repr_year))
             # Format the data
             df = df.loc[:, repr_year]
             df = df.reset_index()
@@ -262,6 +263,7 @@ def format_data_energy(filenames, locations):
         elif reading == 'standard':
             df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3])
             repr_year = find_representative_year(df)
+            print('Representative year {}'.format(repr_year))
             df = df.reset_index()
         else:
             raise ValueError('Unknown reading. Only implemented for: renewable_ninja, standard.')
@@ -301,18 +303,23 @@ def format_data_energy(filenames, locations):
 
 def cluster_data_new(df_energy, n_clusters=10, columns=None):
     """
-    Perform KMeans clustering on selected energy features to identify representative days.
+    Perform KMeans clustering on energy data to identify representative days.
 
     Parameters:
-        df_energy (pd.DataFrame): DataFrame containing energy data with columns ['season', 'day', 'hour', 'PV', 'Wind', 'Load'].
-        n_clusters (int): Number of clusters.
-        columns (list, optional): List of feature columns to use for clustering.
+        df_energy (pd.DataFrame):
+            DataFrame containing energy-related features with columns ['season', 'day', 'hour', 'PV', 'Wind', 'Load'].
+        n_clusters (int, optional):
+            Number of clusters to create. Defaults to 10.
+        columns (list, optional):
+            List of feature columns used for clustering. If None, all columns except ['season', 'day', 'hour'] are used.
 
     Returns:
-        pd.DataFrame: Representative days closest to cluster centroids.
-        pd.DataFrame: Cluster centers as a DataFrame.
-        pd.Series: Probabilities of each cluster based on frequency of occurrence.
+        tuple:
+            - pd.DataFrame: Original DataFrame with assigned cluster labels.
+            - pd.DataFrame: Representative days closest to cluster centroids.
+            - pd.DataFrame: Cluster centroids with associated probabilities.
     """
+
     # Select relevant columns for clustering
     if columns is None:
         columns = [i for i in df_energy.columns if i not in ['season', 'day', 'hour']]
@@ -377,18 +384,23 @@ def cluster_data_new(df_energy, n_clusters=10, columns=None):
 
 def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
     """
-    Defines special days based on clustering results. Clusters representing a large share of the data are excluded by
-    definition, and will be accounted for in the Poncelet algorithm.
-    Args:
-        df_closest_days: pd.DataFrame
-            Closest days in the data to the cluster centroids
-        df_tot: pd.DataFrame
-            Total data including all time series
-        threshold: float
-            Probability threshold to exclude large clusters
+    Identify special days based on clustering results.
+
+    This function selects extreme days (e.g., lowest PV, lowest Wind, highest Load) as centroids of clusters,
+    while ensuring that clusters representing a large share of the data are excluded.
+
+    Parameters:
+        df_closest_days (pd.DataFrame):
+            DataFrame of closest representative days to cluster centroids.
+        df_tot (pd.DataFrame):
+            Original dataset with all time series data.
+        threshold (float, optional):
+            Probability threshold for excluding large clusters. Defaults to 0.07.
 
     Returns:
-
+        tuple:
+            - pd.DataFrame: Special days with associated weights.
+            - pd.DataFrame: Updated df_tot with special days removed.
     """
     df_tot = df_tot.copy()
     special_days = []
@@ -417,32 +429,63 @@ def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
 
 
 def add_special_days(feature, df, df_days, season, special_days, indices_to_remove, rule='min', threshold=0.07):
+    """
+    Select extreme days (e.g., minimum PV, maximum Load) to ensure proper representation of special conditions.
+
+    If an extreme day is already selected, it continues looking for the next most extreme day until a unique one is found.
+
+    Parameters:
+        feature (str):
+            The feature to analyze (e.g., 'PV', 'Wind', 'Load').
+        df (pd.DataFrame):
+            DataFrame containing cluster probabilities and feature values.
+        df_days (pd.DataFrame):
+            Complete dataset with all time series data.
+        season (str):
+            Current season being analyzed.
+        special_days (list):
+            List of previously identified special days.
+        indices_to_remove (set):
+            Set to track days to be removed from df_days.
+        rule (str, optional):
+            Whether to select the 'min' or 'max' extreme value. Defaults to 'min'.
+        threshold (float, optional):
+            Probability threshold for excluding large clusters. Defaults to 0.07.
+
+    Returns:
+        list: Updated list of special days.
+    """
     assert rule in ['min', 'max'], "Rule for selecting cluster should be either 'min' or 'max'."
     columns = [col for col in df.columns if feature in col]
     if len(columns) > 0:
         df = df[df['probability'] < threshold]
         df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
-        if rule == 'min':
-            cluster = df.nsmallest(1, feature)
-        else:
-            cluster = df.nlargest(1, feature)
-        cluster_id = cluster['Cluster'].values[0]
+
+        def find_next_special_day(df, special_days, rule):
+            for i in range(len(df)):  # Iterate over all ranked rows
+                cluster = df.nsmallest(i + 1, feature).iloc[-1:] if rule == 'min' else df.nlargest(i + 1, feature).iloc[-1:]
+                special_day = tuple(cluster[['season', 'day']].values[0])
+                if special_day not in {entry['days'] for entry in special_days}:
+                    return cluster
+            return None  # This should never be reached unless all days are special (unlikely)
+
+        # Find the most extreme day based on rule
+        cluster = df.nsmallest(1, feature) if rule == 'min' else df.nlargest(1, feature)
         special_day = tuple(cluster[['season', 'day']].values[0])
-        if special_day not in {entry['days'] for entry in special_days}:
-            cluster_weight = (df_days[(df_days['season'] == season) & (df_days['Cluster'] == cluster_id)].shape[
-                0]) // 24
-            special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
-        else:  # ensuring to add another representative day with extreme characteristics, if already included through previous features
-            if rule == 'min':
-                cluster = df.nsmallest(2, feature).iloc[-1:]
-            else:
-                cluster = df.nlargest(2, feature).iloc[-1:]
+
+        if special_day in {entry['days'] for entry in special_days}:
+            # If already included, find the next available extreme day
+            cluster = find_next_special_day(df, special_days, rule)
+
+        if cluster is not None:
             cluster_id = cluster['Cluster'].values[0]
             special_day = tuple(cluster[['season', 'day']].values[0])
-            cluster_weight = (df_days[(df_days['season'] == season) & (df_days['Cluster'] == cluster_id)].shape[
-                0]) // 24
-            special_days.append({'days': tuple(special_day), 'weight': cluster_weight})
-        indices_to_remove.update(df_days[(df_days['season'] == season) & (df_days['Cluster'] == cluster_id)].index)
+            cluster_weight = (df_days[(df_days['season'] == season) & (df_days['Cluster'] == cluster_id)].shape[0]) // 24
+            special_days.append({'days': special_day, 'weight': cluster_weight})
+            indices_to_remove.update(df_days[(df_days['season'] == season) & (df_days['Cluster'] == cluster_id)].index)
+        else:
+            raise ValueError(f"All days are already special days.")
+
     return special_days
 
 def find_special_days(df_energy, columns=None):
