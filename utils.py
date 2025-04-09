@@ -21,7 +21,7 @@ from typing import Tuple, Union
 import matplotlib.pyplot as plt
 import calendar
 import warnings
-
+import sys
 import logging
 
 logging.basicConfig(level=logging.WARNING)  # Configure logging level
@@ -79,7 +79,7 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
             raise ValueError("Invalid power_type. Choose either 'solar' or 'wind'.")
 
         # Send the request
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, verify=False)
 
         # Check for successful response
         if response.status_code == 200:
@@ -600,10 +600,14 @@ def launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=3,
     folder_process_data: str
         Path to save the .gms file.
     """
-
-    path_main_file = os.path.join(os.getcwd(), f'gams/{gams_model}.gms')
-    path_setting_file = os.path.join(os.getcwd(), f'gams/{bins_settings}.csv')
+    if sys.platform.startswith("win"):
+        path_main_file = os.path.join(os.getcwd(), f'gams\{gams_model}.gms')
+        path_setting_file = os.path.join(os.getcwd(), f'gams\{bins_settings}.csv')
+    else:
+        path_main_file = os.path.join(os.getcwd(), f'gams/{gams_model}.gms')
+        path_setting_file = os.path.join(os.getcwd(), f'gams/{bins_settings}.csv')
     path_data_file = os.path.join(os.getcwd(), path_data_file)
+    print(path_main_file, path_data_file, path_data_file)
 
     if os.path.isfile(path_main_file) and os.path.isfile(path_data_file):
         command = ["gams", path_main_file] + ["--data {}".format(path_data_file),
@@ -615,7 +619,11 @@ def launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=3,
     # Print the command
     cwd = os.path.join(os.getcwd(), folder_process_data)
     print('Launch GAMS code')
-    subprocess.run(command, cwd=cwd, stdout=subprocess.DEVNULL)
+    if sys.platform.startswith("win"):  # If running on Windows
+        print("Command to execute:", ' '.join(command))
+        subprocess.run(' '.join(command), cwd=cwd, shell=True, stdout=subprocess.DEVNULL)
+    else:  # For Linux or macOS
+        subprocess.run(command, cwd=cwd, stdout=subprocess.DEVNULL)
     print('End GAMS code')
 
     # TODO: Check if the results exist
