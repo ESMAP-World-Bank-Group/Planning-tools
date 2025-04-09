@@ -21,8 +21,8 @@ from typing import Tuple, Union
 import matplotlib.pyplot as plt
 import calendar
 import warnings
-import sys
 import logging
+import sys
 
 logging.basicConfig(level=logging.WARNING)  # Configure logging level
 logger = logging.getLogger(__name__)
