@@ -590,7 +590,7 @@ def format_optim_repr_days(df_energy, name_data, folder_process_data):
 
 
 def launch_optim_repr_days(path_data_file, folder_process_data, nbr_days=3,
-                           gams_model='OptimizationModel', bins_settings='settings_bins30'):
+                           gams_model='OptimizationModel', bins_settings='settings'):
     """Launch the representative dyas optimization.
 
     Parameters
