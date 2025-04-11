@@ -69,8 +69,8 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
     all_data = []
 
     # Iterate over locations
-    for lat, lon in locations:
-        # Build the request URL based on the power type (solar or wind)
+    for country, (lat, lon) in locations.items():
+    # Build the request URL based on the power type (solar or wind)
         if power_type == 'solar':
             url = f"{base_url}pv?lat={lat}&lon={lon}&date_from={start_date}&date_to={end_date}&dataset={dataset}&capacity={capacity}&system_loss={system_loss}&tracking={tracking}&tilt={tilt}&azim={azim}&local_time={local_time}&format=json"
         elif power_type == 'wind':
