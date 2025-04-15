@@ -23,11 +23,14 @@ import calendar
 import warnings
 import logging
 import sys
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import pdist, squareform
+
 
 logging.basicConfig(level=logging.WARNING)  # Configure logging level
 logger = logging.getLogger(__name__)
 
-API_TOKEN = '38bb40c2e0090463d92457a7bb87af45fdbba28b'
+API_TOKEN = '2deb093cdece49f3b316c98687150421ee425566'
 nb_days = pd.Series([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], index=range(1, 13))
 
 
@@ -63,7 +66,8 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
     }
 
     # Track requests per minute
-    requests_made = 0
+    requests_made_minute = 0
+    requests_tot = 0
     minute_start_time = time.time()
 
     all_data = []
@@ -98,10 +102,11 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
             print(f"Error fetching data for location ({lat}, {lon}): {response.status_code}")
 
         # Track the request
-        requests_made += 1
+        requests_made_minute += 1
+        requests_tot += 1
 
         # If we hit 6 requests within a minute, we wait for the remaining time of that minute
-        if requests_made >= 6:
+        if requests_made_minute >= 6:
             print('Waiting for a minute to not hit the API rate limit...')
             elapsed_time = time.time() - minute_start_time
             if elapsed_time < 60:
@@ -110,13 +115,13 @@ def get_renewable_data(power_type, locations, start_date, end_date, api_token=AP
                 time.sleep(sleep_time)
 
             # Reset the counter and timer
-            requests_made = 0
+            requests_made_minute = 0
             minute_start_time = time.time()
 
     # Convert the collected data into a DataFrame
     df = pd.DataFrame(all_data)
     df.rename(columns={'electricity': power_type}, inplace=True)
-    return df, requests_made
+    return df, requests_tot
 
 
 def get_years_renewables(locations, power_type, start_year, end_year, start_day='01-01', end_day='12-31',
@@ -176,9 +181,9 @@ def get_years_renewables(locations, power_type, start_year, end_year, start_day=
 
             results.update({year: data})
 
-        # If we hit 50 requests within an hour, we wait for the remaining time of that minute before continuing the requests
-        if requests_tot >= 49:
-            print('Waiting for a minute to not hit the API rate limit...')
+        # If we hit 50 requests within an hour, we wait for the remaining time of that hour before continuing the requests
+        if requests_tot >= 36:
+            print('Waiting for an hour to not hit the API rate limit...')
             elapsed_time = time.time() - hour_start_time
             if elapsed_time < 3600:
                 sleep_time = 3600 - elapsed_time
@@ -382,6 +387,68 @@ def cluster_data_new(df_energy, n_clusters=10, columns=None):
     return df_tot, df_closest_days, centroids_df
 
 
+def select_representative_series_hierarchical(df: pd.DataFrame, n: int, method: str = 'ward',
+                                              metric: str = 'euclidean', scale: bool = True,
+                                              scale_method: str = 'standard'):
+    """
+    Reduce dimensionality of time series features using hierarchical clustering, keeping only real series.
+
+    Parameters:
+        df (pd.DataFrame):
+            DataFrame with columns as different time series (e.g., 'Wind_ZM', 'PV_BW', 'Corr_Load_TZ__PV_MZ', etc.)
+            and rows as time steps (e.g., hours in the season).
+        n (int):
+            Number of representative time series to keep.
+        method (str):
+            Linkage method for hierarchical clustering (e.g., 'ward', 'average', 'complete').
+        metric (str):
+            Distance metric (e.g., 'euclidean', 'cosine', 'correlation').
+
+    Returns:
+        list:
+            Names of selected time series (columns) to retain.
+        pd.DataFrame:
+            Reduced DataFrame with only the selected columns.
+    """
+    # Transpose to get features as rows
+    series_matrix = df.T.values  # shape: (n_series, n_timesteps)
+    series_names = df.columns.tolist()
+
+    # Optional scaling
+    if scale:
+        if scale_method == 'standard':
+            scaler = StandardScaler()
+        elif scale_method == 'minmax':
+            from sklearn.preprocessing import MinMaxScaler
+            scaler = MinMaxScaler()
+        else:
+            raise ValueError("scale_method must be 'standard' or 'minmax'")
+        series_matrix = scaler.fit_transform(series_matrix)
+
+    # Compute pairwise distance
+    distance_matrix = pdist(series_matrix, metric=metric)
+
+    # Hierarchical clustering
+    linkage_matrix = linkage(distance_matrix, method=method)
+
+    # Cut the dendrogram into n clusters
+    cluster_labels = fcluster(linkage_matrix, t=n, criterion='maxclust')
+
+    # For each cluster, find the series closest to the centroid
+    selected_series = []
+    for cluster_id in range(1, n + 1):
+        cluster_indices = np.where(cluster_labels == cluster_id)[0]
+        cluster_vectors = series_matrix[cluster_indices]
+        centroid = cluster_vectors.mean(axis=0)
+
+        # Compute distance to centroid
+        distances = np.linalg.norm(cluster_vectors - centroid, axis=1)
+        closest_idx = cluster_indices[np.argmin(distances)]
+        selected_series.append(series_names[closest_idx])
+
+    return selected_series, df[selected_series]
+
+
 def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
     """
     Identify special days based on clustering results.
@@ -414,7 +481,7 @@ def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
         add_special_days(feature='Wind', df=df_season, df_days=df_tot, season=season, special_days=special_days,
                          indices_to_remove=indices_to_remove, rule='min', threshold=0.07)
 
-        # second special day is based on maximum peak demand across all zones
+        # third special day is based on maximum peak demand across all zones
         add_special_days(feature='Load', df=df_season, df_days=df_tot, season=season, special_days=special_days,
                          indices_to_remove=indices_to_remove, rule='max', threshold=0.07)
 
@@ -487,6 +554,7 @@ def add_special_days(feature, df, df_days, season, special_days, indices_to_remo
             raise ValueError(f"All days are already special days.")
 
     return special_days
+
 
 def find_special_days(df_energy, columns=None):
     """Find special days within the representative year.
