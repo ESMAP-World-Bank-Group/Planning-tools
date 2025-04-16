@@ -238,7 +238,7 @@ def find_representative_year(df, method='average_profile'):
     return repr_year
 
 
-def format_data_energy(filenames, locations):
+def format_data_energy_old(filenames, locations):
     """Format the data for the energy from .csv files.
 
     Parameters
@@ -297,6 +297,71 @@ def format_data_energy(filenames, locations):
 
     if df_energy.isna().any().any():
         print('Warning: NaN values in the DataFrame')
+
+    print('Annual capacity factor (%):', df_energy.groupby('zone')[keys_to_merge].mean().reset_index())
+    if len(df_energy.zone.unique()) > 1:  # handling the case with multiple zones to rename columns
+        df_energy = df_energy.set_index(['zone', 'season', 'day', 'hour']).unstack('zone')
+        df_energy.columns = ['_'.join([idx0, idx1]) for idx0, idx1 in df_energy.columns]
+        df_energy = df_energy.reset_index()
+    else:
+        df_energy = df_energy.drop('zone', axis=1)
+    return df_energy
+
+
+def format_data_energy(filenames, locations):
+    """Format the data for the energy from .csv files.
+
+    Parameters
+    ----------
+    filenames: dict
+        Dictionary with the filenames.
+
+    Returns
+    -------
+    df_energy: pd.DataFrame
+        DataFrame with the energy data.
+    """
+    # Find the representative year
+
+    df_energy = {}
+    for key, item in filenames.items():
+        filename, reading = item[0], item[1]
+
+        # Extract from the data results
+        if reading == 'renewable_ninja':
+            df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3, 4, 5])
+            df = df.reset_index()
+            df['tech'] = key
+            df['zone'] = list(zip(df['latitude'], df['longitude']))  # Convert lat/lon to tuples
+            df['zone'] = df['zone'].map(locations)
+            df = df.drop(columns=['latitude', 'longitude', 'time_only']).set_index(['zone', 'season', 'day', 'hour', 'tech'])
+
+        elif reading == 'standard':
+            df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3])
+            df = df.reset_index()
+            df['tech'] = key
+            df = df.set_index(['zone', 'season', 'day', 'hour', 'tech'])
+
+        else:
+            raise ValueError('Unknown reading. Only implemented for: renewable_ninja, standard.')
+
+        df_energy.update({key: df})
+
+    df_energy = pd.concat(df_energy.values(), ignore_index=False)
+
+    repr_year = find_representative_year(df_energy)
+    print('Representative year {}'.format(repr_year))
+    df_energy = df_energy.loc[:, repr_year].unstack('tech').reset_index()
+
+    # If 2/29, remove it
+    if len(df_energy.season.unique()) == 12:  # season expressed as months
+        df_energy = df_energy[~((df_energy['season'] == 2) & (df_energy['day'] == 29))]
+
+    if df_energy.isna().any().any():
+        print('Warning: NaN values in the DataFrame')
+
+    keys_to_merge = ['PV', 'Wind', 'Load', 'ROR']
+    keys_to_merge = [i for i in keys_to_merge if i in df_energy.keys()]
 
     print('Annual capacity factor (%):', df_energy.groupby('zone')[keys_to_merge].mean().reset_index())
     if len(df_energy.zone.unique()) > 1:  # handling the case with multiple zones to rename columns
@@ -499,9 +564,13 @@ def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
 
 def add_special_days(feature, df, df_days, season, special_days, indices_to_remove, rule='min', threshold=0.07):
     """
-    Select extreme days (e.g., minimum PV, maximum Load) to ensure proper representation of special conditions.
+    Identifies and adds a representative 'special day' from a given season based on extreme values
+    of a selected feature (e.g., PV, Load, Wind) across multiple zones.
 
-    If an extreme day is already selected, it continues looking for the next most extreme day until a unique one is found.
+    The function looks for the day within a season that corresponds to the most extreme value
+    (minimum or maximum depending on the `rule`) of the summed feature across all zones, excluding
+    high-probability clusters (based on the `threshold`). If the most extreme day is already present
+    in `special_days`, the function iteratively selects the next most extreme day that hasn’t been used.
 
     Parameters:
         feature (str):
@@ -526,6 +595,8 @@ def add_special_days(feature, df, df_days, season, special_days, indices_to_remo
     """
     assert rule in ['min', 'max'], "Rule for selecting cluster should be either 'min' or 'max'."
     columns = [col for col in df.columns if feature in col]
+    df = df.copy()
+
     if len(columns) > 0:
         df = df[df['probability'] < threshold]
         df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
