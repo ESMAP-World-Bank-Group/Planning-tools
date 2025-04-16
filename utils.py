@@ -238,76 +238,6 @@ def find_representative_year(df, method='average_profile'):
     return repr_year
 
 
-def format_data_energy_old(filenames, locations):
-    """Format the data for the energy from .csv files.
-
-    Parameters
-    ----------
-    filenames: dict
-        Dictionary with the filenames.
-
-    Returns
-    -------
-    df_energy: pd.DataFrame
-        DataFrame with the energy data.
-    """
-    # Find the representative year
-
-    df_energy = {}
-    for key, item in filenames.items():
-        filename, reading = item[0], item[1]
-
-        # Extract from the data results
-        if reading == 'renewable_ninja':
-            df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3, 4, 5])
-            repr_year = find_representative_year(df)
-            print('Representative year {}'.format(repr_year))
-            # Format the data
-            df = df.loc[:, repr_year]
-            df = df.reset_index()
-            df['zone'] = list(zip(df['latitude'], df['longitude']))  # Convert lat/lon to tuples
-            df['zone'] = df['zone'].map(locations)
-        elif reading == 'standard':
-            df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3])
-            repr_year = find_representative_year(df)
-            print('Representative year {}'.format(repr_year))
-            df = df.reset_index()
-        else:
-            raise ValueError('Unknown reading. Only implemented for: renewable_ninja, standard.')
-
-        df = df.loc[:, ['zone', 'season', 'day', 'hour', repr_year]].rename(columns={repr_year: key})
-        df = df.sort_values(by=['zone', 'season', 'day', 'hour'], ascending=True).reset_index(drop=True)
-
-        # If 2/29, remove it
-        if len(df.season.unique()) == 12:  # season expressed as months
-            df = df[~((df['season'] == 2) & (df['day'] == 29))]
-
-        df_energy.update({key: df})
-
-    keys_to_merge = ['PV', 'Wind', 'Load', 'ROR']
-    keys_to_merge = [i for i in keys_to_merge if i in df_energy.keys()]
-
-    # Dynamically merge all DataFrames in df_energy based on the specified keys
-    df_energy = reduce(
-        lambda left, right: pd.merge(left, right, on=['zone', 'season', 'day', 'hour']),
-        (df_energy[k] for k in keys_to_merge))
-
-    if len(df_energy.season.unique()) == 12:  # only when seasons are the months, we remove the 29th of February
-        df_energy = df_energy[~((df_energy['season'] == 2) & (df_energy['day'] == 29))]
-
-    if df_energy.isna().any().any():
-        print('Warning: NaN values in the DataFrame')
-
-    print('Annual capacity factor (%):', df_energy.groupby('zone')[keys_to_merge].mean().reset_index())
-    if len(df_energy.zone.unique()) > 1:  # handling the case with multiple zones to rename columns
-        df_energy = df_energy.set_index(['zone', 'season', 'day', 'hour']).unstack('zone')
-        df_energy.columns = ['_'.join([idx0, idx1]) for idx0, idx1 in df_energy.columns]
-        df_energy = df_energy.reset_index()
-    else:
-        df_energy = df_energy.drop('zone', axis=1)
-    return df_energy
-
-
 def format_data_energy(filenames, locations):
     """Format the data for the energy from .csv files.
 
@@ -352,6 +282,7 @@ def format_data_energy(filenames, locations):
     repr_year = find_representative_year(df_energy)
     print('Representative year {}'.format(repr_year))
     df_energy = df_energy.loc[:, repr_year].unstack('tech').reset_index()
+    df_energy = df_energy.sort_values(by=['zone', 'season', 'day', 'hour'], ascending=True)
 
     # If 2/29, remove it
     if len(df_energy.season.unique()) == 12:  # season expressed as months
