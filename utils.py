@@ -1184,3 +1184,52 @@ def make_boxplot(df, tech):
     plt.title(f"Distribution of Daily {tech} Generation by Season and Zone")
     plt.tight_layout()
     plt.show()
+
+def plot_days(type, rep_days, input_file, DemandProfile, VREProfile, pHours, season_colors, color_types): 
+    min_alpha = 0.3
+    max_alpha = 1.0
+
+    plt.figure(figsize=(10, 6))
+
+    # Plot all base year days in background
+    input_file.columns = ['season', 'day', 'hour', 'PV', 'Wind', 'Load', 'PVWindcorr', 'PVLoadcorr', 'WindLoadcorr']
+    for (season, day), group in input_file.groupby(['season', 'day']):
+        plt.plot(group['hour'], group[type], color='orange', alpha=0.1, zorder=1)
+
+    if rep_days is not None:
+        if type == 'Load':
+            df_rep = DemandProfile.copy()
+        else:
+            df_rep = VREProfile[VREProfile['fuel'] == type]
+
+        df_rep_long = df_rep.melt(id_vars=['zone', 'season', 'daytype'], var_name='hour', value_name=type)
+        df_rep_long['hour'] = df_rep_long['hour'].str.extract(r't(\d+)').astype(int)
+
+        phours_long = pHours.melt(id_vars=['season', 'daytype'], var_name='hour', value_name='weight')
+        phours_avg = phours_long.groupby(['season', 'daytype'], as_index=False)['weight'].mean()
+        df_rep_long = df_rep_long.merge(phours_avg, on=['season', 'daytype'])
+
+        # Get min/max weights for scaling alpha
+        wmin, wmax = df_rep_long['weight'].min(), df_rep_long['weight'].max()
+        def scale_alpha(w):
+            if wmax == wmin:
+                return (min_alpha + max_alpha) / 2
+            return min_alpha + (w - wmin) / (wmax - wmin) * (max_alpha - min_alpha)
+
+        # Plot rep days: color by season, alpha by weight
+        for (season, daytype), group in df_rep_long.groupby(['season', 'daytype']):
+            if rep_days == 'all' or daytype in rep_days:
+                weight = group['weight'].iloc[0]
+                label = f'{season}-{daytype} ({int(weight)})'
+                color = season_colors.get(season, 'grey')
+                alpha = scale_alpha(weight)
+                plt.plot(group['hour'], group[type], label=label, color=color, linewidth=2, alpha=alpha, zorder=2)
+
+    plt.title(f'Representative year - {type} hourly profiles')
+    plt.xlabel('Hour of the Day')
+    plt.ylabel(type if type != 'Load' else 'Load (MW)')
+    plt.xticks(range(0, 24))
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.legend(fontsize=8, ncol=2, loc='upper left')
+    plt.tight_layout()
+    plt.show()
