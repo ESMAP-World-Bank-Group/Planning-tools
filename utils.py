@@ -25,6 +25,8 @@ import logging
 import sys
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import pdist, squareform
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
 
 
 logging.basicConfig(level=logging.WARNING)  # Configure logging level
@@ -1128,4 +1130,55 @@ def plot_dispatch(df, day_level='daytype', season_level='season', title=None):
     ax.set_ylim(bottom=0)
     if title is not None:
         ax.set_title(title)
+    plt.show()
+
+
+def make_heatmap(df, tech):
+    df_energy = df.copy()
+    daily_df = df_energy.groupby(['season', 'day'], as_index=False).sum(numeric_only=True).drop(columns='hour')
+    daily_df['season-day'] = daily_df["season"].astype(str) + " - " + daily_df["day"].astype(str)
+    tmp = daily_df.sort_values(['season', 'day']).copy()
+
+    heatmap_data = tmp[[col for col in tmp.columns if tech in col]]
+    heatmap_data.index = tmp['season-day']
+
+    # Get tick positions where the season changes
+    season_labels = tmp['season'].values
+    x_positions = []
+    x_labels = []
+    for i in range(1, len(season_labels)):
+        if season_labels[i] != season_labels[i - 1]:
+            x_positions.append(i)
+            x_labels.append(season_labels[i])
+    # Add the first season manually
+    x_positions = [0] + x_positions
+    x_labels = [season_labels[0]] + x_labels
+
+    # Plot
+    plt.figure(figsize=(12, 6))
+    sns.heatmap(heatmap_data.T, cmap='YlGnBu', xticklabels=False)
+
+    # Custom x-ticks with season only
+    plt.xticks(ticks=x_positions, labels=x_labels, rotation=0)
+    plt.xlabel("Season")
+    plt.ylabel("Zone")
+    plt.title(f"Heatmap of Daily {tech} Generation (Grouped by Season)")
+    plt.tight_layout()
+    plt.show()
+
+
+def make_boxplot(df, tech):
+    df_energy = df.copy()
+    daily_df = df_energy.groupby(['season', 'day'], as_index=False).sum(numeric_only=True).drop(columns='hour')
+    daily_df['season-day'] = daily_df["season"].astype(str) + " - " + daily_df["day"].astype(str)
+    tmp = daily_df.sort_values(['season', 'day']).copy()
+
+    melted = tmp.melt(id_vars=['season', 'day'], value_vars=[col for col in tmp.columns if tech in col],
+                      var_name='zone', value_name='daily_sum')
+
+    plt.figure(figsize=(14, 6))
+    sns.boxplot(data=melted, x="zone", y="daily_sum", hue="season")
+    plt.xticks(rotation=45)
+    plt.title(f"Distribution of Daily {tech} Generation by Season and Zone")
+    plt.tight_layout()
     plt.show()
