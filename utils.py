@@ -17,6 +17,7 @@ import subprocess
 from functools import reduce
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 from typing import Tuple, Union
 import matplotlib.pyplot as plt
 import calendar
@@ -26,7 +27,6 @@ import sys
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import pdist, squareform
 import seaborn as sns
-from sklearn.preprocessing import StandardScaler
 
 
 logging.basicConfig(level=logging.WARNING)  # Configure logging level
@@ -184,7 +184,7 @@ def get_years_renewables(locations, power_type, start_year, end_year, start_day=
             results.update({year: data})
 
         # If we hit 50 requests within an hour, we wait for the remaining time of that hour before continuing the requests
-        if requests_tot >= 36:
+        if requests_tot >= 45:  # need to take a margin based on the number of requests that will be made for a given year (based on the number of locations)
             print('Waiting for an hour to not hit the API rate limit...')
             elapsed_time = time.time() - hour_start_time
             if elapsed_time < 3600:
@@ -260,39 +260,43 @@ def format_data_energy(filenames, locations):
         # Extract from the data results
         if reading == 'renewable_ninja':
             df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3, 4, 5])
+            repr_year = find_representative_year(df)
+            print('Representative year {}'.format(repr_year))
+            # Format the data
+            df = df.loc[:, repr_year]
             df = df.reset_index()
-            df['tech'] = key
             df['zone'] = list(zip(df['latitude'], df['longitude']))  # Convert lat/lon to tuples
             df['zone'] = df['zone'].map(locations)
-            df = df.drop(columns=['latitude', 'longitude', 'time_only']).set_index(['zone', 'season', 'day', 'hour', 'tech'])
-
         elif reading == 'standard':
             df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3])
+            repr_year = find_representative_year(df)
+            print('Representative year {}'.format(repr_year))
             df = df.reset_index()
-            df['tech'] = key
-            df = df.set_index(['zone', 'season', 'day', 'hour', 'tech'])
-
         else:
             raise ValueError('Unknown reading. Only implemented for: renewable_ninja, standard.')
 
+        df = df.loc[:, ['zone', 'season', 'day', 'hour', repr_year]].rename(columns={repr_year: key})
+        df = df.sort_values(by=['zone', 'season', 'day', 'hour'], ascending=True).reset_index(drop=True)
+
+        # If 2/29, remove it
+        if len(df.season.unique()) == 12:  # season expressed as months
+            df = df[~((df['season'] == 2) & (df['day'] == 29))]
+
         df_energy.update({key: df})
 
-    df_energy = pd.concat(df_energy.values(), ignore_index=False)
+    keys_to_merge = ['PV', 'Wind', 'Load', 'ROR']
+    keys_to_merge = [i for i in keys_to_merge if i in df_energy.keys()]
 
-    repr_year = find_representative_year(df_energy)
-    print('Representative year {}'.format(repr_year))
-    df_energy = df_energy.loc[:, repr_year].unstack('tech').reset_index()
-    df_energy = df_energy.sort_values(by=['zone', 'season', 'day', 'hour'], ascending=True)
+    # Dynamically merge all DataFrames in df_energy based on the specified keys
+    df_energy = reduce(
+        lambda left, right: pd.merge(left, right, on=['zone', 'season', 'day', 'hour']),
+        (df_energy[k] for k in keys_to_merge))
 
-    # If 2/29, remove it
-    if len(df_energy.season.unique()) == 12:  # season expressed as months
+    if len(df_energy.season.unique()) == 12:  # only when seasons are the months, we remove the 29th of February
         df_energy = df_energy[~((df_energy['season'] == 2) & (df_energy['day'] == 29))]
 
     if df_energy.isna().any().any():
         print('Warning: NaN values in the DataFrame')
-
-    keys_to_merge = ['PV', 'Wind', 'Load', 'ROR']
-    keys_to_merge = [i for i in keys_to_merge if i in df_energy.keys()]
 
     print('Annual capacity factor (%):', df_energy.groupby('zone')[keys_to_merge].mean().reset_index())
     if len(df_energy.zone.unique()) > 1:  # handling the case with multiple zones to rename columns
@@ -495,13 +499,9 @@ def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
 
 def add_special_days(feature, df, df_days, season, special_days, indices_to_remove, rule='min', threshold=0.07):
     """
-    Identifies and adds a representative 'special day' from a given season based on extreme values
-    of a selected feature (e.g., PV, Load, Wind) across multiple zones.
+    Select extreme days (e.g., minimum PV, maximum Load) to ensure proper representation of special conditions.
 
-    The function looks for the day within a season that corresponds to the most extreme value
-    (minimum or maximum depending on the `rule`) of the summed feature across all zones, excluding
-    high-probability clusters (based on the `threshold`). If the most extreme day is already present
-    in `special_days`, the function iteratively selects the next most extreme day that hasn’t been used.
+    If an extreme day is already selected, it continues looking for the next most extreme day until a unique one is found.
 
     Parameters:
         feature (str):
@@ -526,8 +526,6 @@ def add_special_days(feature, df, df_days, season, special_days, indices_to_remo
     """
     assert rule in ['min', 'max'], "Rule for selecting cluster should be either 'min' or 'max'."
     columns = [col for col in df.columns if feature in col]
-    df = df.copy()
-
     if len(columns) > 0:
         df = df[df['probability'] < threshold]
         df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
@@ -810,6 +808,7 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
         Name of the zone.
     """
     pVREProfile = df_energy.copy()
+    print(df_energy)
     pVREProfile['season'] = pVREProfile['season'].apply(lambda x: f'Q{x}')
 
     pVREProfile = pVREProfile.set_index(['season', 'day', 'hour'])
@@ -823,6 +822,11 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
     t = t.set_index(['season', 'day'])
     pVREProfile = pVREProfile.unstack('hour')
     # select only the representative days
+    print(pVREProfile)
+    print("pVREProfile index sample:", pVREProfile.index[:5])
+    print("t index sample:", t.index[:5])
+    print("Index types:", type(pVREProfile.index), type(t.index))
+    print("Common elements:", t.index.intersection(pVREProfile.index))
     pVREProfile = pVREProfile.loc[t.index, :]
     pVREProfile = pVREProfile.stack(level=['fuel', 'zone'])
     pVREProfile = pd.merge(pVREProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(
@@ -1200,10 +1204,10 @@ def plot_days(type, rep_days, input_file, DemandProfile, VREProfile, pHours, sea
         if type == 'Load':
             df_rep = DemandProfile.copy()
         else:
-            df_rep = VREProfile[VREProfile['fuel'] == type]
+            df_rep = VREProfile[VREProfile['fuel'] == type].drop(columns='fuel')
 
         df_rep_long = df_rep.melt(id_vars=['zone', 'season', 'daytype'], var_name='hour', value_name=type)
-        df_rep_long['hour'] = df_rep_long['hour'].str.extract(r't(\d+)').astype(int)
+        df_rep_long['hour'] = df_rep_long['hour'].astype(str).str.extract(r't(\d+)')[0].astype(int) - 1
 
         phours_long = pHours.melt(id_vars=['season', 'daytype'], var_name='hour', value_name='weight')
         phours_avg = phours_long.groupby(['season', 'daytype'], as_index=False)['weight'].mean()
