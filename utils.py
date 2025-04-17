@@ -17,7 +17,6 @@ import subprocess
 from functools import reduce
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
 from typing import Tuple, Union
 import matplotlib.pyplot as plt
 import calendar
@@ -27,6 +26,8 @@ import sys
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import pdist, squareform
 import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from itertools import combinations
 
 
 logging.basicConfig(level=logging.WARNING)  # Configure logging level
@@ -184,7 +185,7 @@ def get_years_renewables(locations, power_type, start_year, end_year, start_day=
             results.update({year: data})
 
         # If we hit 50 requests within an hour, we wait for the remaining time of that hour before continuing the requests
-        if requests_tot >= 45:  # need to take a margin based on the number of requests that will be made for a given year (based on the number of locations)
+        if requests_tot >= 36:
             print('Waiting for an hour to not hit the API rate limit...')
             elapsed_time = time.time() - hour_start_time
             if elapsed_time < 3600:
@@ -260,43 +261,39 @@ def format_data_energy(filenames, locations):
         # Extract from the data results
         if reading == 'renewable_ninja':
             df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3, 4, 5])
-            repr_year = find_representative_year(df)
-            print('Representative year {}'.format(repr_year))
-            # Format the data
-            df = df.loc[:, repr_year]
             df = df.reset_index()
+            df['tech'] = key
             df['zone'] = list(zip(df['latitude'], df['longitude']))  # Convert lat/lon to tuples
             df['zone'] = df['zone'].map(locations)
+            df = df.drop(columns=['latitude', 'longitude', 'time_only']).set_index(['zone', 'season', 'day', 'hour', 'tech'])
+
         elif reading == 'standard':
             df = pd.read_csv(filename, header=[0], index_col=[0, 1, 2, 3])
-            repr_year = find_representative_year(df)
-            print('Representative year {}'.format(repr_year))
             df = df.reset_index()
+            df['tech'] = key
+            df = df.set_index(['zone', 'season', 'day', 'hour', 'tech'])
+
         else:
             raise ValueError('Unknown reading. Only implemented for: renewable_ninja, standard.')
 
-        df = df.loc[:, ['zone', 'season', 'day', 'hour', repr_year]].rename(columns={repr_year: key})
-        df = df.sort_values(by=['zone', 'season', 'day', 'hour'], ascending=True).reset_index(drop=True)
-
-        # If 2/29, remove it
-        if len(df.season.unique()) == 12:  # season expressed as months
-            df = df[~((df['season'] == 2) & (df['day'] == 29))]
-
         df_energy.update({key: df})
 
-    keys_to_merge = ['PV', 'Wind', 'Load', 'ROR']
-    keys_to_merge = [i for i in keys_to_merge if i in df_energy.keys()]
+    df_energy = pd.concat(df_energy.values(), ignore_index=False)
 
-    # Dynamically merge all DataFrames in df_energy based on the specified keys
-    df_energy = reduce(
-        lambda left, right: pd.merge(left, right, on=['zone', 'season', 'day', 'hour']),
-        (df_energy[k] for k in keys_to_merge))
+    repr_year = find_representative_year(df_energy)
+    print('Representative year {}'.format(repr_year))
+    df_energy = df_energy.loc[:, repr_year].unstack('tech').reset_index()
+    df_energy = df_energy.sort_values(by=['zone', 'season', 'day', 'hour'], ascending=True)
 
-    if len(df_energy.season.unique()) == 12:  # only when seasons are the months, we remove the 29th of February
+    # If 2/29, remove it
+    if len(df_energy.season.unique()) == 12:  # season expressed as months
         df_energy = df_energy[~((df_energy['season'] == 2) & (df_energy['day'] == 29))]
 
     if df_energy.isna().any().any():
         print('Warning: NaN values in the DataFrame')
+
+    keys_to_merge = ['PV', 'Wind', 'Load', 'ROR']
+    keys_to_merge = [i for i in keys_to_merge if i in df_energy.keys()]
 
     print('Annual capacity factor (%):', df_energy.groupby('zone')[keys_to_merge].mean().reset_index())
     if len(df_energy.zone.unique()) > 1:  # handling the case with multiple zones to rename columns
@@ -310,7 +307,11 @@ def format_data_energy(filenames, locations):
 
 def cluster_data_new(df_energy, n_clusters=10, columns=None):
     """
-    Perform KMeans clustering on energy data to identify representative days.
+    Perform KMeans clustering on daily energy data to identify representative clusters by season.
+
+    This function applies KMeans clustering to energy data grouped by season, where each data point
+    represents the sum of values for a single day. It enables identification of clustered daily profiles
+    (e.g., for PV, Wind, Load) separately for each season.
 
     Parameters:
         df_energy (pd.DataFrame):
@@ -389,15 +390,15 @@ def cluster_data_new(df_energy, n_clusters=10, columns=None):
     return df_tot, df_closest_days, centroids_df
 
 
-def select_representative_series_hierarchical(df: pd.DataFrame, n: int, method: str = 'ward',
+def select_representative_series_hierarchical(path_data_file: str, n: int, method: str = 'ward',
                                               metric: str = 'euclidean', scale: bool = True,
                                               scale_method: str = 'standard'):
     """
     Reduce dimensionality of time series features using hierarchical clustering, keeping only real series.
 
     Parameters:
-        df (pd.DataFrame):
-            DataFrame with columns as different time series (e.g., 'Wind_ZM', 'PV_BW', 'Corr_Load_TZ__PV_MZ', etc.)
+        path_data_file (str):
+            Path to the dataframe with columns as different time series (e.g., 'Wind_ZM', 'PV_BW', 'Corr_Load_TZ__PV_MZ', etc.)
             and rows as time steps (e.g., hours in the season).
         n (int):
             Number of representative time series to keep.
@@ -412,6 +413,9 @@ def select_representative_series_hierarchical(df: pd.DataFrame, n: int, method: 
         pd.DataFrame:
             Reduced DataFrame with only the selected columns.
     """
+    path_data_file = os.path.join(os.getcwd(), path_data_file)
+    df = pd.read_csv(path_data_file, index_col=[0,1,2])
+
     # Transpose to get features as rows
     series_matrix = df.T.values  # shape: (n_series, n_timesteps)
     series_names = df.columns.tolist()
@@ -448,7 +452,13 @@ def select_representative_series_hierarchical(df: pd.DataFrame, n: int, method: 
         closest_idx = cluster_indices[np.argmin(distances)]
         selected_series.append(series_names[closest_idx])
 
-    return selected_series, df[selected_series]
+    path_data_file_selection = path_data_file.split('.csv')[0]
+    path_data_file_selection = f'{path_data_file_selection}_selection.csv'
+
+    df[selected_series].to_csv(path_data_file_selection, index=True)
+    print('File saved at:', path_data_file_selection)
+
+    return selected_series, df[selected_series], path_data_file_selection
 
 
 def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
@@ -499,9 +509,13 @@ def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
 
 def add_special_days(feature, df, df_days, season, special_days, indices_to_remove, rule='min', threshold=0.07):
     """
-    Select extreme days (e.g., minimum PV, maximum Load) to ensure proper representation of special conditions.
+    Identifies and adds a representative 'special day' from a given season based on extreme values
+    of a selected feature (e.g., PV, Load, Wind) across multiple zones.
 
-    If an extreme day is already selected, it continues looking for the next most extreme day until a unique one is found.
+    The function looks for the day within a season that corresponds to the most extreme value
+    (minimum or maximum depending on the `rule`) of the summed feature across all zones, excluding
+    high-probability clusters (based on the `threshold`). If the most extreme day is already present
+    in `special_days`, the function iteratively selects the next most extreme day that hasn’t been used.
 
     Parameters:
         feature (str):
@@ -526,6 +540,8 @@ def add_special_days(feature, df, df_days, season, special_days, indices_to_remo
     """
     assert rule in ['min', 'max'], "Rule for selecting cluster should be either 'min' or 'max'."
     columns = [col for col in df.columns if feature in col]
+    df = df.copy()
+
     if len(columns) > 0:
         df = df[df['probability'] < threshold]
         df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
@@ -572,24 +588,41 @@ def find_special_days(df_energy, columns=None):
         DataFrame with the special days.
     """
     # Find the special days within the representative year
-    if columns is None:
-        columns = [i for i in df_energy.columns if i not in ['season', 'day', 'hour']]
+
+    df = df_energy.copy()
+
+    def get_special_day(df, feature, rule):
+        if rule == 'min':
+            min_prod = df.groupby(['season', 'day'])[feature].sum().unstack().idxmin(axis=1)
+            min_prod = list(min_prod.items())
+            return min_prod
+        else:  # rule = 'max'
+            max_load = df.groupby(['season', 'day'])[feature].sum().unstack().idxmax(axis=1)
+            max_load = list(max_load.items())
+            return max_load
 
     special_days = {}
-    for column in columns:
-        # Remove the day with the minimum production
-        if column in ['Wind', 'PV', 'ROR']:
-            min_prod = df_energy.groupby(['season', 'day'])[column].sum().unstack().idxmin(axis=1)
-            min_prod = list(min_prod.items())
 
-            special_days.update({column: min_prod})
-        elif column in ['Load']:
-            max_load = df_energy.groupby(['season', 'day'])[column].sum().unstack().idxmax(axis=1)
-            max_load = list(max_load.items())
+    feature = 'PV'
+    columns = [col for col in df_energy.columns if feature in col]
+    if len(columns) > 0:
+        df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
+        special_day = get_special_day(df, feature, rule='min')
+        special_days.update({feature: special_day})
 
-            special_days.update({column: max_load})
-        else:
-            raise ValueError('Unknown column. Only implemented for: Wind, PV, ROR, Load.')
+    feature = 'Wind'
+    columns = [col for col in df_energy.columns if feature in col]
+    if len(columns) > 0:
+        df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
+        special_day = get_special_day(df, feature, rule='min')
+        special_days.update({feature: special_day})
+
+    feature = 'Load'
+    columns = [col for col in df_energy.columns if feature in col]
+    if len(columns) > 0:
+        df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
+        special_day = get_special_day(df, feature, rule='max')
+        special_days.update({feature: special_day})
 
     # Format special days
     special_days = sorted([item for sublist in special_days.values() for item in sublist])
@@ -618,13 +651,17 @@ def calculate_pairwise_correlation(df):
         DataFrame with the energy data.
     """
     columns = [i for i in df.columns if i not in ['season', 'day', 'hour']]
+    new_columns = {}
 
-    # Iterate through all pairs of columns
-    for i, col1 in enumerate(columns):
-        for col2 in columns[i + 1:]:
-            # Calculate the correlation for each row
-            corr_col_name = f"{col1}{col2}corr"
-            df[corr_col_name] = (df[col1] - df[col1].mean()) * (df[col2] - df[col2].mean())
+    # Precompute means for efficiency
+    means = {col: df[col].mean() for col in columns}
+
+    for col1, col2 in combinations(columns, 2):
+        corr_col_name = f"{col1}_{col2}_corr"
+        new_columns[corr_col_name] = (df[col1] - means[col1]) * (df[col2] - means[col2])
+
+    # Add all new columns at once
+    df = pd.concat([df, pd.DataFrame(new_columns)], axis=1)
 
     return df
 
@@ -808,12 +845,11 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
         Name of the zone.
     """
     pVREProfile = df_energy.copy()
-    print(df_energy)
     pVREProfile['season'] = pVREProfile['season'].apply(lambda x: f'Q{x}')
 
     pVREProfile = pVREProfile.set_index(['season', 'day', 'hour'])
     pVREProfile = pVREProfile[[col for col in df_energy.columns if (('PV' in col) or ('Wind' in col))]]
-    pVREProfile.columns = pd.MultiIndex.from_tuples([tuple(col.split('_')) for col in pVREProfile.columns])
+    pVREProfile.columns = pd.MultiIndex.from_tuples([tuple([col.split('_')[0], '_'.join(col.split('_')[1:])]) for col in pVREProfile.columns])
     if pVREProfile.columns.nlevels == 1:
         pVREProfile.columns = pd.MultiIndex.from_tuples([(col[0], name_data) for col in pVREProfile.columns])
     pVREProfile.columns.names = ['fuel', 'zone']
@@ -822,11 +858,6 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
     t = t.set_index(['season', 'day'])
     pVREProfile = pVREProfile.unstack('hour')
     # select only the representative days
-    print(pVREProfile)
-    print("pVREProfile index sample:", pVREProfile.index[:5])
-    print("t index sample:", t.index[:5])
-    print("Index types:", type(pVREProfile.index), type(t.index))
-    print("Common elements:", t.index.intersection(pVREProfile.index))
     pVREProfile = pVREProfile.loc[t.index, :]
     pVREProfile = pVREProfile.stack(level=['fuel', 'zone'])
     pVREProfile = pd.merge(pVREProfile.reset_index(), t.reset_index(), on=['season', 'day']).set_index(
@@ -1189,51 +1220,151 @@ def make_boxplot(df, tech):
     plt.tight_layout()
     plt.show()
 
-def plot_days(type, rep_days, input_file, DemandProfile, VREProfile, pHours, season_colors, color_types): 
-    min_alpha = 0.3
-    max_alpha = 1.0
 
-    plt.figure(figsize=(10, 6))
+def plot_vre_repdays(input_file, vre_profile, pHours, season_colors, countries=None,
+                   fontsize_legend=8, alpha_background=0.1, min_alpha=0.3, max_alpha=1):
+    """
+    Plot time series of renewable generation (e.g., PV, Wind) for all days and highlight representative days.
 
-    # Plot all base year days in background
-    input_file.columns = ['season', 'day', 'hour', 'PV', 'Wind', 'Load', 'PVWindcorr', 'PVLoadcorr', 'WindLoadcorr']
-    for (season, day), group in input_file.groupby(['season', 'day']):
-        plt.plot(group['hour'], group[type], color='orange', alpha=0.1, zorder=1)
+    This function displays hourly renewable generation profiles for all days (as background lines)
+    and overlays the representative days used in the Poncelet algorithm, with line opacity
+    proportional to their weight in the optimization.
 
-    if rep_days is not None:
-        if type == 'Load':
-            df_rep = DemandProfile.copy()
-        else:
-            df_rep = VREProfile[VREProfile['fuel'] == type].drop(columns='fuel')
+    Parameters
+    ----------
+    input_file : pd.DataFrame
+        Hourly renewable generation data with a multi-index (season, day, hour) and multi-index columns (fuel, zone).
 
-        df_rep_long = df_rep.melt(id_vars=['zone', 'season', 'daytype'], var_name='hour', value_name=type)
-        df_rep_long['hour'] = df_rep_long['hour'].astype(str).str.extract(r't(\d+)')[0].astype(int) - 1
+    vre_profile : pd.DataFrame
+        Output from the representative day selection, formatted with representative generation profiles.
 
-        phours_long = pHours.melt(id_vars=['season', 'daytype'], var_name='hour', value_name='weight')
-        phours_avg = phours_long.groupby(['season', 'daytype'], as_index=False)['weight'].mean()
-        df_rep_long = df_rep_long.merge(phours_avg, on=['season', 'daytype'])
+    pHours : pd.DataFrame
+        Hourly weights associated with each representative day, used to scale the line opacity.
 
-        # Get min/max weights for scaling alpha
-        wmin, wmax = df_rep_long['weight'].min(), df_rep_long['weight'].max()
-        def scale_alpha(w):
-            if wmax == wmin:
-                return (min_alpha + max_alpha) / 2
-            return min_alpha + (w - wmin) / (wmax - wmin) * (max_alpha - min_alpha)
+    season_colors : dict
+        Dictionary mapping each season to a color.
 
-        # Plot rep days: color by season, alpha by weight
-        for (season, daytype), group in df_rep_long.groupby(['season', 'daytype']):
-            if rep_days == 'all' or daytype in rep_days:
-                weight = group['weight'].iloc[0]
-                label = f'{season}-{daytype} ({int(weight)})'
-                color = season_colors.get(season, 'grey')
+    countries : list, optional
+        List of zones to include. If None, all available zones are used.
+
+    fontsize_legend : int, default 8
+        Font size for the legend.
+
+    alpha_background : float, default 0.1
+        Transparency for the background lines representing all days.
+
+    min_alpha : float, default 0.3
+        Minimum transparency for the representative day lines (lowest weight).
+
+    max_alpha : float, default 1
+        Maximum opacity for the representative day lines (highest weight).
+
+    Notes
+    -----
+    - One subplot is generated per fuel and season.
+    - Representative days are plotted with darker lines when their weight in the optimization is higher.
+    - All background days are plotted in a lighter color for context.
+    """
+
+    input_file = input_file.copy()
+    input_file.index = input_file.index.set_levels(
+        ['Q' + str(s) for s in input_file.index.levels[0]],
+        level='season'
+    )
+    input_file.index = input_file.index.set_levels(
+        ['d' + str(s) for s in input_file.index.levels[1]],
+        level='day'
+    )
+
+    # Remove correlation columns
+    columns = [c for c in input_file.columns if 'corr' not in c]
+    input_file = input_file[columns]
+
+    # Reconstruct MultiIndex if needed
+    if input_file.columns.nlevels == 1:
+        input_file.columns = pd.MultiIndex.from_tuples(
+            [tuple([col.split('_')[0], '_'.join(col.split('_')[1:])]) for col in input_file.columns])
+        input_file.columns.names = ['fuel', 'zone']
+
+    if countries is None:
+        countries = input_file.columns.get_level_values('zone').unique()
+
+    input_file = input_file.loc[:, input_file.columns.get_level_values('zone').isin(countries)]
+
+    fuels = input_file.columns.get_level_values('fuel').unique()
+    seasons = input_file.index.get_level_values('season').unique()
+
+    df_rep = vre_profile.loc[vre_profile.index.get_level_values('zone').isin(countries), :]
+    df_rep.columns = df_rep.columns.astype(str).str.extract(r't(\d+)')[0].astype(int) - 1
+    df_rep = df_rep.stack()
+    df_rep.index.names = ['zone', 'fuel', 'season', 'day', 'hour']
+    df_rep = df_rep.unstack(['zone', 'fuel'])
+
+    df_hours = pHours.copy()
+    df_hours.columns = df_hours.columns.astype(str).str.extract(r't(\d+)')[0].astype(int) - 1
+    df_hours = df_hours.stack()
+    df_hours.index.names = ['season', 'day', 'hour']
+
+    # Get min/max weights for scaling alpha
+    wmin, wmax = df_hours.min(), df_hours.max()
+
+    def scale_alpha(w):
+        if wmax == wmin:
+            return (min_alpha + max_alpha) / 2
+        return min_alpha + (w - wmin) / (wmax - wmin) * (max_alpha - min_alpha)
+
+
+    fig, axs = plt.subplots(len(fuels), len(seasons), figsize=(5 * len(seasons), 3.5 * len(fuels)), sharey=True, sharex=True)
+
+    # Always use 2D indexing for axs
+    if len(fuels) == 1:
+        axs = axs[np.newaxis, :]
+    if len(seasons) == 1:
+        axs = axs[:, np.newaxis]
+
+    for i, fuel in enumerate(fuels):
+        subset_days = input_file.loc[:, input_file.columns.get_level_values('fuel') == fuel]
+        subset_repdays = df_rep.loc[:, df_rep.columns.get_level_values('fuel') == fuel]
+
+        for j, season in enumerate(seasons):
+            ax = axs[i][j]
+            season_data = subset_days.loc[season]
+            season_repdays = subset_repdays.loc[season]
+
+            for day in season_data.index.get_level_values('day').unique():
+                day_data = season_data.loc[day]
+                ax.plot(
+                    day_data.index.get_level_values('hour'),
+                    day_data.sum(axis=1),
+                    color=season_colors.get(season, 'orange'),
+                    alpha=alpha_background
+                )
+
+            for repday in season_repdays.index.get_level_values('day').unique():
+                day_data = season_repdays.loc[repday]
+                weight = df_hours.xs(season, level='season').xs(repday, level='day').mean()
+                label = f'{season}-{repday} ({int(weight)})'
+
                 alpha = scale_alpha(weight)
-                plt.plot(group['hour'], group[type], label=label, color=color, linewidth=2, alpha=alpha, zorder=2)
+                ax.plot(
+                    day_data.index.get_level_values('hour'),
+                    day_data.sum(axis=1),
+                    color=season_colors.get(season, 'grey'),
+                    alpha=alpha,
+                    linewidth = 2,
+                    label=label,
+                    zorder=2
+                )
 
-    plt.title(f'Representative year - {type} hourly profiles')
-    plt.xlabel('Hour of the Day')
-    plt.ylabel(type if type != 'Load' else 'Load (MW)')
-    plt.xticks(range(0, 24))
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.legend(fontsize=8, ncol=2, loc='upper left')
+            ax.set_title(f"{fuel} - {season}")
+            ax.legend(loc='upper right', fontsize=fontsize_legend, frameon=False)
+            if j == 0:
+                ax.set_ylabel("Generation")
+            ax.grid(True)
+
+    axs[-1][-1].set_xlabel("Hour of day")
     plt.tight_layout()
     plt.show()
+
+
+
