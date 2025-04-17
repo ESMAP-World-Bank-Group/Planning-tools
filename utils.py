@@ -27,6 +27,7 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import pdist, squareform
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
+from itertools import combinations
 
 
 logging.basicConfig(level=logging.WARNING)  # Configure logging level
@@ -385,15 +386,15 @@ def cluster_data_new(df_energy, n_clusters=10, columns=None):
     return df_tot, df_closest_days, centroids_df
 
 
-def select_representative_series_hierarchical(df: pd.DataFrame, n: int, method: str = 'ward',
+def select_representative_series_hierarchical(path_data_file: str, n: int, method: str = 'ward',
                                               metric: str = 'euclidean', scale: bool = True,
                                               scale_method: str = 'standard'):
     """
     Reduce dimensionality of time series features using hierarchical clustering, keeping only real series.
 
     Parameters:
-        df (pd.DataFrame):
-            DataFrame with columns as different time series (e.g., 'Wind_ZM', 'PV_BW', 'Corr_Load_TZ__PV_MZ', etc.)
+        path_data_file (str):
+            Path to the dataframe with columns as different time series (e.g., 'Wind_ZM', 'PV_BW', 'Corr_Load_TZ__PV_MZ', etc.)
             and rows as time steps (e.g., hours in the season).
         n (int):
             Number of representative time series to keep.
@@ -408,6 +409,9 @@ def select_representative_series_hierarchical(df: pd.DataFrame, n: int, method: 
         pd.DataFrame:
             Reduced DataFrame with only the selected columns.
     """
+    path_data_file = os.path.join(os.getcwd(), path_data_file)
+    df = pd.read_csv(path_data_file, index_col=[0,1,2])
+
     # Transpose to get features as rows
     series_matrix = df.T.values  # shape: (n_series, n_timesteps)
     series_names = df.columns.tolist()
@@ -444,7 +448,13 @@ def select_representative_series_hierarchical(df: pd.DataFrame, n: int, method: 
         closest_idx = cluster_indices[np.argmin(distances)]
         selected_series.append(series_names[closest_idx])
 
-    return selected_series, df[selected_series]
+    path_data_file_selection = path_data_file.split('.csv')[0]
+    path_data_file_selection = f'{path_data_file_selection}_selection.csv'
+
+    df[selected_series].to_csv(path_data_file_selection, index=True)
+    print('File saved at:', path_data_file_selection)
+
+    return selected_series, df[selected_series], path_data_file_selection
 
 
 def get_special_days_clustering(df_closest_days, df_tot, threshold=0.07):
@@ -620,13 +630,17 @@ def calculate_pairwise_correlation(df):
         DataFrame with the energy data.
     """
     columns = [i for i in df.columns if i not in ['season', 'day', 'hour']]
+    new_columns = {}
 
-    # Iterate through all pairs of columns
-    for i, col1 in enumerate(columns):
-        for col2 in columns[i + 1:]:
-            # Calculate the correlation for each row
-            corr_col_name = f"{col1}{col2}corr"
-            df[corr_col_name] = (df[col1] - df[col1].mean()) * (df[col2] - df[col2].mean())
+    # Precompute means for efficiency
+    means = {col: df[col].mean() for col in columns}
+
+    for col1, col2 in combinations(columns, 2):
+        corr_col_name = f"{col1}_{col2}_corr"
+        new_columns[corr_col_name] = (df[col1] - means[col1]) * (df[col2] - means[col2])
+
+    # Add all new columns at once
+    df = pd.concat([df, pd.DataFrame(new_columns)], axis=1)
 
     return df
 
