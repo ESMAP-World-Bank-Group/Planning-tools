@@ -307,7 +307,11 @@ def format_data_energy(filenames, locations):
 
 def cluster_data_new(df_energy, n_clusters=10, columns=None):
     """
-    Perform KMeans clustering on energy data to identify representative days.
+    Perform KMeans clustering on daily energy data to identify representative clusters by season.
+
+    This function applies KMeans clustering to energy data grouped by season, where each data point
+    represents the sum of values for a single day. It enables identification of clustered daily profiles
+    (e.g., for PV, Wind, Load) separately for each season.
 
     Parameters:
         df_energy (pd.DataFrame):
@@ -584,24 +588,41 @@ def find_special_days(df_energy, columns=None):
         DataFrame with the special days.
     """
     # Find the special days within the representative year
-    if columns is None:
-        columns = [i for i in df_energy.columns if i not in ['season', 'day', 'hour']]
+
+    df = df_energy.copy()
+
+    def get_special_day(df, feature, rule):
+        if rule == 'min':
+            min_prod = df.groupby(['season', 'day'])[feature].sum().unstack().idxmin(axis=1)
+            min_prod = list(min_prod.items())
+            return min_prod
+        else:  # rule = 'max'
+            max_load = df.groupby(['season', 'day'])[feature].sum().unstack().idxmax(axis=1)
+            max_load = list(max_load.items())
+            return max_load
 
     special_days = {}
-    for column in columns:
-        # Remove the day with the minimum production
-        if column in ['Wind', 'PV', 'ROR']:
-            min_prod = df_energy.groupby(['season', 'day'])[column].sum().unstack().idxmin(axis=1)
-            min_prod = list(min_prod.items())
 
-            special_days.update({column: min_prod})
-        elif column in ['Load']:
-            max_load = df_energy.groupby(['season', 'day'])[column].sum().unstack().idxmax(axis=1)
-            max_load = list(max_load.items())
+    feature = 'PV'
+    columns = [col for col in df_energy.columns if feature in col]
+    if len(columns) > 0:
+        df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
+        special_day = get_special_day(df, feature, rule='min')
+        special_days.update({feature: special_day})
 
-            special_days.update({column: max_load})
-        else:
-            raise ValueError('Unknown column. Only implemented for: Wind, PV, ROR, Load.')
+    feature = 'Wind'
+    columns = [col for col in df_energy.columns if feature in col]
+    if len(columns) > 0:
+        df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
+        special_day = get_special_day(df, feature, rule='min')
+        special_days.update({feature: special_day})
+
+    feature = 'Load'
+    columns = [col for col in df_energy.columns if feature in col]
+    if len(columns) > 0:
+        df.loc[:, feature] = df.loc[:, columns].sum(axis=1)
+        special_day = get_special_day(df, feature, rule='max')
+        special_days.update({feature: special_day})
 
     # Format special days
     special_days = sorted([item for sublist in special_days.values() for item in sublist])
@@ -828,7 +849,7 @@ def format_epm_pvreprofile(df_energy, repr_days, folder, name_data=''):
 
     pVREProfile = pVREProfile.set_index(['season', 'day', 'hour'])
     pVREProfile = pVREProfile[[col for col in df_energy.columns if (('PV' in col) or ('Wind' in col))]]
-    pVREProfile.columns = pd.MultiIndex.from_tuples([tuple(col.split('_')) for col in pVREProfile.columns])
+    pVREProfile.columns = pd.MultiIndex.from_tuples([tuple([col.split('_')[0], '_'.join(col.split('_')[1:])]) for col in pVREProfile.columns])
     if pVREProfile.columns.nlevels == 1:
         pVREProfile.columns = pd.MultiIndex.from_tuples([(col[0], name_data) for col in pVREProfile.columns])
     pVREProfile.columns.names = ['fuel', 'zone']
@@ -1196,5 +1217,180 @@ def make_boxplot(df, tech):
     sns.boxplot(data=melted, x="zone", y="daily_sum", hue="season")
     plt.xticks(rotation=45)
     plt.title(f"Distribution of Daily {tech} Generation by Season and Zone")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_days_new2(type, rep_days, input_file, vre_profile, pHours, season_colors, countries=None,
+                   fontsize_legend=8, alpha_background=0.1, min_alpha=0.3, max_alpha=1):
+
+    input_file = input_file.copy()
+    input_file.index = input_file.index.set_levels(
+        ['Q' + str(s) for s in input_file.index.levels[0]],
+        level='season'
+    )
+    input_file.index = input_file.index.set_levels(
+        ['d' + str(s) for s in input_file.index.levels[1]],
+        level='day'
+    )
+
+    # Remove correlation columns
+    columns = [c for c in input_file.columns if 'corr' not in c]
+    input_file = input_file[columns]
+
+    # Reconstruct MultiIndex if needed
+    if input_file.columns.nlevels == 1:
+        input_file.columns = pd.MultiIndex.from_tuples(
+            [tuple([col.split('_')[0], '_'.join(col.split('_')[1:])]) for col in input_file.columns])
+        input_file.columns.names = ['fuel', 'zone']
+
+    if countries is None:
+        countries = input_file.columns.get_level_values('zone').unique()
+
+    input_file = input_file.loc[:, input_file.columns.get_level_values('zone').isin(countries)]
+
+    fuels = input_file.columns.get_level_values('fuel').unique()
+    seasons = input_file.index.get_level_values('season').unique()
+
+    df_rep = vre_profile.loc[vre_profile.index.get_level_values('zone').isin(countries), :]
+    df_rep.columns = df_rep.columns.astype(str).str.extract(r't(\d+)')[0].astype(int) - 1
+    df_rep = df_rep.stack()
+    df_rep.index.names = ['zone', 'fuel', 'season', 'day', 'hour']
+    df_rep = df_rep.unstack(['zone', 'fuel'])
+
+    df_hours = pHours.copy()
+    df_hours.columns = df_hours.columns.astype(str).str.extract(r't(\d+)')[0].astype(int) - 1
+    df_hours = df_hours.stack()
+    df_hours.index.names = ['season', 'day', 'hour']
+
+    # Get min/max weights for scaling alpha
+    wmin, wmax = df_hours.min(), df_hours.max()
+
+    def scale_alpha(w):
+        if wmax == wmin:
+            return (min_alpha + max_alpha) / 2
+        return min_alpha + (w - wmin) / (wmax - wmin) * (max_alpha - min_alpha)
+
+    # def scale_alpha(w):
+    #     if w <= 0:
+    #         return min_alpha
+    #     logmin, logmax = np.log(wmin + 1), np.log(wmax + 1)
+    #     norm = (np.log(w + 1) - logmin) / (logmax - logmin)
+    #     return min_alpha + norm * (max_alpha - min_alpha)
+
+    fig, axs = plt.subplots(len(fuels), len(seasons), figsize=(5 * len(seasons), 3.5 * len(fuels)), sharey=True, sharex=True)
+
+    # Always use 2D indexing for axs
+    if len(fuels) == 1:
+        axs = axs[np.newaxis, :]
+    if len(seasons) == 1:
+        axs = axs[:, np.newaxis]
+
+    for i, fuel in enumerate(fuels):
+        subset_days = input_file.loc[:, input_file.columns.get_level_values('fuel') == fuel]
+        subset_repdays = df_rep.loc[:, df_rep.columns.get_level_values('fuel') == fuel]
+
+        for j, season in enumerate(seasons):
+            ax = axs[i][j]
+            season_data = subset_days.loc[season]
+            season_repdays = subset_repdays.loc[season]
+
+            for day in season_data.index.get_level_values('day').unique():
+                day_data = season_data.loc[day]
+                ax.plot(
+                    day_data.index.get_level_values('hour'),
+                    day_data.sum(axis=1),
+                    color=season_colors.get(season, 'orange'),
+                    alpha=alpha_background
+                )
+
+            for repday in season_repdays.index.get_level_values('day').unique():
+                day_data = season_repdays.loc[repday]
+                weight = df_hours.xs(season, level='season').xs(repday, level='day').mean()
+                label = f'{season}-{repday} ({int(weight)})'
+
+                alpha = scale_alpha(weight)
+                ax.plot(
+                    day_data.index.get_level_values('hour'),
+                    day_data.sum(axis=1),
+                    color=season_colors.get(season, 'grey'),
+                    alpha=alpha,
+                    linewidth = 2,
+                    label=label,
+                    zorder=2
+                )
+
+            ax.set_title(f"{fuel} - {season}")
+            ax.legend(loc='upper right', fontsize=fontsize_legend, frameon=False)
+            if j == 0:
+                ax.set_ylabel("Generation")
+            ax.grid(True)
+
+    axs[-1][-1].set_xlabel("Hour of day")
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+def plot_days(type, rep_days, input_file, DemandProfile, VREProfile, pHours, season_colors, countries=None):
+    min_alpha = 0.3
+    max_alpha = 1.0
+
+    plt.figure(figsize=(10, 6))
+
+    # Plot all base year days in background
+    input_file = input_file.copy()
+    columns = [c for c in input_file.columns if 'corr' not in c]  # we get rid of correlation columns
+    input_file = input_file[columns]
+    input_file.columns = pd.MultiIndex.from_tuples([tuple([col.split('_')[0], '_'.join(col.split('_')[1:])]) for col in input_file.columns])
+    # TODO: to modify to include single zone case
+    # if input_file.columns.nlevels == 1:
+    #     pVREProfile.columns = pd.MultiIndex.from_tuples([(col[0], name_data) for col in pVREProfile.columns])
+    input_file.columns.names = ['fuel', 'zone']
+
+    if countries is None:
+        countries = input_file.columns.get_level_values('zone').unique()
+
+    input_file = input_file.loc[:, input_file.columns.get_level_values('zone').isin(countries)]
+
+    for (season, day), group in input_file.groupby(['season', 'day']):
+        plt.plot(group['hour'], group[type], color='orange', alpha=0.1, zorder=1)
+
+    if rep_days is not None:
+        if type == 'Load':
+            df_rep = DemandProfile.copy()
+        else:
+            df_rep = VREProfile[VREProfile['fuel'] == type].drop(columns='fuel')
+
+        df_rep_long = df_rep.melt(id_vars=['zone', 'season', 'daytype'], var_name='hour', value_name=type)
+        df_rep_long['hour'] = df_rep_long['hour'].astype(str).str.extract(r't(\d+)')[0].astype(int) - 1
+
+        phours_long = pHours.melt(id_vars=['season', 'daytype'], var_name='hour', value_name='weight')
+        phours_avg = phours_long.groupby(['season', 'daytype'], as_index=False)['weight'].mean()
+        df_rep_long = df_rep_long.merge(phours_avg, on=['season', 'daytype'])
+
+        # Get min/max weights for scaling alpha
+        wmin, wmax = df_rep_long['weight'].min(), df_rep_long['weight'].max()
+        def scale_alpha(w):
+            if wmax == wmin:
+                return (min_alpha + max_alpha) / 2
+            return min_alpha + (w - wmin) / (wmax - wmin) * (max_alpha - min_alpha)
+
+        # Plot rep days: color by season, alpha by weight
+        for (season, daytype), group in df_rep_long.groupby(['season', 'daytype']):
+            if rep_days == 'all' or daytype in rep_days:
+                weight = group['weight'].iloc[0]
+                label = f'{season}-{daytype} ({int(weight)})'
+                color = season_colors.get(season, 'grey')
+                alpha = scale_alpha(weight)
+                plt.plot(group['hour'], group[type], label=label, color=color, linewidth=2, alpha=alpha, zorder=2)
+
+    plt.title(f'Representative year - {type} hourly profiles')
+    plt.xlabel('Hour of the Day')
+    plt.ylabel(type if type != 'Load' else 'Load (MW)')
+    plt.xticks(range(0, 24))
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.legend(fontsize=8, ncol=2, loc='upper left')
     plt.tight_layout()
     plt.show()
