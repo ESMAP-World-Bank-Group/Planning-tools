@@ -5,7 +5,7 @@
 # The function get_renewable_data() fetches the data for multiple locations and returns a dictionary of results for each location.
 # The function also handles rate limiting by waiting for a minute if the rate limit is hit.
 # The data is then saved to a CSV file for further analysis.
-# Author: Lucas Vivier: lvivier@worldbank.org
+# Authors: Lucas Vivier (lvivier@worldbank.org), Célia Escribe (cescribe@worldbank.org)
 
 import requests
 import pandas as pd
@@ -28,6 +28,8 @@ from scipy.spatial.distance import pdist, squareform
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 from itertools import combinations
+from scipy.optimize import linprog
+from scipy.sparse import lil_matrix
 
 
 logging.basicConfig(level=logging.WARNING)  # Configure logging level
@@ -1394,3 +1396,130 @@ def plot_days(type, rep_days, input_file, DemandProfile, VREProfile, pHours, sea
     plt.legend(fontsize=8, ncol=2, loc='upper left')
     plt.tight_layout()
     plt.show()
+
+
+def run_smoothing_reservoir(config):
+    """
+    Smooths the energy dispatch of a hydro reservoir by solving a linear optimization problem.
+
+    The function models a hydro power plant with a reservoir and optimizes its hourly dispatch
+    to meet inflow and storage constraints while minimizing variability in dispatch across time
+    and across seasons. It ensures the system operates within physical limits such as reservoir capacity,
+    minimum seasonal storage, and seasonal balance in dispatch.
+
+    Args:
+        config (dict): Dictionary containing model parameters. Required keys are:
+            - 'hours' (int): Total number of time steps (typically hours).
+            - 'inflow' (np.ndarray): Array of inflows into the reservoir [GWh] of shape (hours,).
+            - 'reservoir_size' (float): Maximum storage capacity of the reservoir [GWh].
+            - 'reservoir_min' (float): Minimum storage level as a fraction of reservoir_size
+              (e.g., 0.2 for 20%). Enforced only during specified hours.
+            - 'hours_reservoir_min_constraints' (np.ndarray): Array of time indices (ints)
+              where the minimum storage level must be enforced.
+
+    Returns:
+        res (scipy.optimize.OptimizeResult): Result object from `scipy.optimize.linprog` containing:
+            - res.x: Optimal values of the decision variables (inflow, outflow, storage, dispatch, abs_diff, D_j, U_j).
+            - res.fun: Value of the objective function at the optimum (total smoothing cost).
+            - res.success: Boolean indicating whether optimization succeeded.
+            - res.message: Solver status message.
+    """
+
+    # Parameters
+    hours = config['hours']
+    reservoir_max = config['reservoir_size']  # in GWh
+    min_storage = config['reservoir_min'] * reservoir_max
+    seasonal_hours = config['hours_reservoir_min_constraints']  # must be a numpy array containing the t for which the reservoir constraint should be enforced
+    inflow = config['inflow']  # should be of shape (hours,)
+
+    # Variables: [i_t, o_t, s_t, d_t, u_t, D_j, U_j] for each hour, plus D1-D4, plus U1-U3
+    n = hours
+    n_var = 5 * n + 4 + 3  # hourly vars + seasonal dispatch sums + abs diffs
+
+    # Objective: minimize sum of U_j
+    c = np.zeros(n_var)
+    c[5 * n + 4:] = 1  # U1, U2, U3
+    c[4: 5 * n: 5] = 1  # u_t terms
+
+    # Bounds
+    bounds = [(0, None), (0, None), (0, reservoir_max), (0, None), (0, None)] * n
+    bounds += [(0, None)] * 4  # D1-D4
+    bounds += [(0, None)] * 3  # U1-U3
+
+    # Equality constraints: storage + dispatch + seasonal sums
+    A_eq = lil_matrix((2 * n + 4, n_var))
+    b_eq = np.zeros(2 * n + 4)
+
+    for t in range(n):
+        # Storage equation: s_t - s_{t-1} - i_t + o_t = 0
+        if t > 0:
+            A_eq[t - 1, 5 * t + 2] = 1  # s_t
+            A_eq[t - 1, 5 * t + 0] = -1  # i_t
+            A_eq[t - 1, 5 * t + 1] = 1  # o_t
+            A_eq[t - 1, 5 * (t - 1) + 2] = -1  # s_{t-1}
+
+        # Dispatch equation: d_t + i_t - o_t = inflow_t
+        A_eq[n - 1 + t, 5 * t + 3] = 1  # d_t
+        A_eq[n - 1 + t, 5 * t + 0] = 1  # i_t
+        A_eq[n - 1 + t, 5 * t + 1] = -1  # o_t
+        b_eq[n - 1 + t] = inflow[t]
+
+    # Equation to ensure storage level is the same at beginning and end
+    A_eq[2 * n - 1, 2] = 1
+    A_eq[2 * n - 1, 5 * (n - 1) + 2] = -1
+
+    # Seasonal sum constraints: D_j = sum(d_t in season j)
+    season_length = n // 4
+    for j in range(4):
+        for t in range(j * season_length, (j + 1) * season_length):
+            A_eq[2 * n + j, 5 * t + 3] = 1  # coefficients for each d_t in the season
+        A_eq[2 * n + j, 5 * n + j] = -1  # subtract D_j
+
+    # Inequality constraints
+    row_max = 2 * (n - 1) + len(seasonal_hours) + 6
+    A_ub = lil_matrix((row_max, n_var))
+    b_ub = np.zeros(row_max)
+
+    row = 0
+
+    # Absolute value for difference in outcomes
+    for t in range(1, n):
+        # u_t >= |d_t - d_{t-1}|
+        A_ub[row, 5 * t + 4] = -1
+        A_ub[row, 5 * t + 3] = 1
+        A_ub[row, 5 * (t - 1) + 3] = -1
+        row += 1
+
+        A_ub[row, 5 * t + 4] = -1
+        A_ub[row, 5 * t + 3] = -1
+        A_ub[row, 5 * (t - 1) + 3] = 1
+        row += 1
+
+    # Seasonal storage constraint: s_t >= min → -s_t <= -min
+    for t in seasonal_hours:
+        A_ub[row, 5 * t + 2] = -1
+        b_ub[row] = -min_storage
+        row += 1
+
+    # U_j >= |D_{j+1} - D_j|
+    for j in range(3):
+        # D_{j+1} - D_j - U_j <= 0
+        A_ub[row, 5 * n + j + 1] = 1
+        A_ub[row, 5 * n + j] = -1
+        A_ub[row, 5 * n + 4 + j] = -1
+        row += 1
+
+        # D_{j} - D_{j+1} - U_j <= 0
+        A_ub[row, 5 * n + j + 1] = -1
+        A_ub[row, 5 * n + j] = 1
+        A_ub[row, 5 * n + 4 + j] = -1
+        row += 1
+
+    # Solve
+    res = linprog(c, A_ub=A_ub.tocsr(), b_ub=b_ub[:row],
+                   A_eq=A_eq.tocsr(), b_eq=b_eq,
+                   bounds=bounds, method='highs')
+
+    # Output result status
+    print(res.success, res.fun)
+    return res
